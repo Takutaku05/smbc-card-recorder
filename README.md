@@ -1,0 +1,2 @@
+# smbc-card-recorder
+三井住友カードの利用通知メールをGmailから取得し、Googleスプレッドシートに自動記録するPythonスクリプト。
