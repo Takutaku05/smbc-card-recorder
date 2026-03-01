@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 import mailDisco
 import purpose
-import database
+
 import schedule
 
 from google.auth.transport.requests import Request
@@ -461,43 +461,7 @@ def check_mail_job():
     print(f"--- {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}: メールチェック完了 ---")
 
 
-def sync_sheet_job():
-    """
-    Googleスプレッドシートの最新データを読み込み、SQLiteデータベースと同期する定期実行ジョブ。
 
-    1. 今月のシート（例: '11月'）を取得する。
-    2. 全データを取得し、ヘッダー行を除去してデータ部分のみを抽出する。
-    3. ``database.sync_data`` を呼び出して同期を実行する。
-
-    :return: なし
-    :rtype: None
-    """
-    global gc
-    if gc is None: return
-
-    print(f"\n--- {datetime.datetime.now()}: シート同期開始 ---")
-    
-    current_month_sheet = f'{datetime.datetime.now().month}月'
-
-    try:
-        spreadsheet = gc.open_by_key(SPREADSHEET_ID)
-        worksheet = spreadsheet.worksheet(current_month_sheet)
-        
-        # 全データを取得
-        all_rows = worksheet.get_all_values()
-        
-        # ヘッダー行（1行目、2行目）を除外するかどうか
-        data_rows = all_rows[2:] 
-
-        if data_rows:
-            database.sync_data(current_month_sheet, data_rows)
-        else:
-            print("  データがありませんでした。")
-
-    except gspread.exceptions.WorksheetNotFound:
-        print(f"⚠️ シート '{current_month_sheet}' が見つかりません。")
-    except Exception as e:
-        print(f"❌ シート同期中にエラー: {e}")
 
 # --- メインの実行ブロック ---
 if __name__ == "__main__":
@@ -512,8 +476,7 @@ if __name__ == "__main__":
         schedule.every().hour.at(":00").do(check_mail_job)
         schedule.every().hour.at(":30").do(check_mail_job)
 
-        schedule.every().hour.at(":05").do(sync_sheet_job)
-        schedule.every().hour.at(":35").do(sync_sheet_job)
+
         
         print(f"スケジューラーを実行中です。")
         print(f"次回の実行は {schedule.next_run().strftime('%Y-%m-%d %H:%M:%S')} です。")
@@ -522,7 +485,7 @@ if __name__ == "__main__":
         print("初回実行中...")
         check_mail_job()
         time.sleep(1)
-        sync_sheet_job()
+
         print("初回実行完了。")
 
         try:
