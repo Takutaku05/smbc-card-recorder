@@ -1,5 +1,4 @@
 import requests
-from dotenv import load_dotenv
 import os
 
 class mailDisco:
@@ -22,11 +21,16 @@ class mailDisco:
         """
         URL = os.getenv("DISCORD_WEBHOOK_URL")
 
+        if not URL:
+            print("⚠️ 環境変数 'DISCORD_WEBHOOK_URL' が設定されていません。Discord通知をスキップします。")
+            return
+
         message_content = {
             "content":self.message
         }
         try:
-            requests.post(URL,json=message_content)
+            response = requests.post(URL, json=message_content, timeout=5)
+            if not response.ok:
+                print(f"❌ Discord通知の送信に失敗しました。ステータスコード: {response.status_code}")
         except requests.exceptions.RequestException as e:
-            print("error")
-            print(e)
+            print(f"❌ Discord通知の送信中にエラーが発生しました: {e}")

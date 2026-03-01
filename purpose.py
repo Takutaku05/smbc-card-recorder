@@ -23,7 +23,7 @@ class purpose:
         "外食費",
         "生活雑貨",
         "交通費",
-        "その他"
+        "その他",
     ]
     
     _category_map = None
