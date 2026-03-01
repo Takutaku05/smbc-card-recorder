@@ -175,7 +175,7 @@ def sheet(email_time, location, money):
     抽出されたデータをGoogleスプレッドシートに書き込む。
 
     1. 抽出データに欠損（"N/A"）がある場合は警告し、Discordに通知を送る。
-    2. ``purpose`` クラスを使用して、利用場所からカテゴリ（食費、交通費など）を自動判定する。
+    2. ``Purpose`` クラスを使用して、利用場所からカテゴリ（食費、交通費など）を自動判定する。
     3. 対象月のシート（例: "11月"）が存在するか確認し、なければ "Sheet1" にフォールバックする。
     4. シートの空いている行を探してデータを追記する。
 
@@ -196,19 +196,19 @@ def sheet(email_time, location, money):
         spreadsheet = gc.open_by_key(SPREADSHEET_ID)
         if email_time == "N/A":
             print("⚠️ 利用日が抽出できませんでした。")
-            mailDisco.mailDisco("⚠️ 利用日が抽出できませんでした。").send()
+            mailDisco.MailDisco("⚠️ 利用日が抽出できませんでした。").send()
             sheet_name = f'{datetime.datetime.now().month}月'
         elif location == "N/A":
             print("⚠️ 利用先が抽出できませんでした。")
-            mailDisco.mailDisco("⚠️ 利用先が抽出できませんでした。").send()
+            mailDisco.MailDisco("⚠️ 利用先が抽出できませんでした。").send()
             sheet_name = "Sheet1"
         elif money == "N/A":
             print("⚠️ 利用金額が抽出できませんでした。")
-            mailDisco.mailDisco("⚠️ 利用金額が抽出できませんでした。").send()
+            mailDisco.MailDisco("⚠️ 利用金額が抽出できませんでした。").send()
             sheet_name = "Sheet1"
         else:
             sheet_name = timesheet(email_time)
-            mailDisco.mailDisco(f"【正常に書き込みました】\n利用先: {location}").send()
+            mailDisco.MailDisco(f"【正常に書き込みました】\n利用先: {location}").send()
         
         try:
             worksheet = spreadsheet.worksheet(sheet_name)
@@ -217,13 +217,13 @@ def sheet(email_time, location, money):
             try:
                 print(f"    ...フォールバックとして 'Sheet1' への書き込みを試みます。")
                 worksheet = spreadsheet.worksheet("Sheet1")
-                mailDisco.mailDisco(f"⚠️ ワークシート '{sheet_name}' が見つからず、 'Sheet1' に書き込みました。").send()
+                mailDisco.MailDisco(f"⚠️ ワークシート '{sheet_name}' が見つからず、 'Sheet1' に書き込みました。").send()
             except gspread.exceptions.WorksheetNotFound:
                 print(f"❌ ワークシート 'Sheet1' も見つかりません。書き込みを中止します。")
                 return
 
         
-        purpose_instance = purpose.purpose(location)
+        purpose_instance = purpose.Purpose(location)
         judged_purpose = purpose_instance.judge()
 
         # 常に4要素[日時, 場所, 金額, 用途]
@@ -453,10 +453,10 @@ def check_mail_job():
 
     except HttpError as error:
         print(f"❌ Gmail API呼び出し中にエラーが発生しました: {error}")
-        mailDisco.mailDisco("❌ Gmail API呼び出し中にエラーが発生しました").send()
+        mailDisco.MailDisco("❌ Gmail API呼び出し中にエラーが発生しました").send()
     except Exception as e:
         print(f"❌ ジョブ実行で予期せぬエラーが発生しました: {e}")
-        mailDisco.mailDisco("ジョブ実行で予期せぬエラーが発生しました").send()
+        mailDisco.MailDisco("ジョブ実行で予期せぬエラーが発生しました").send()
 
     print(f"--- {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}: メールチェック完了 ---")
 
@@ -470,7 +470,7 @@ if __name__ == "__main__":
 
     if initialize_services(): # サービス初期化
         print("✅ サービス初期化完了。スケジューラーを開始します。")
-        mailDisco.mailDisco("--- メール監視システムを起動しました ---").send()
+        mailDisco.MailDisco("--- メール監視システムを起動しました ---").send()
 
         # スケジュールの設定
         schedule.every().hour.at(":00").do(check_mail_job)
@@ -494,8 +494,8 @@ if __name__ == "__main__":
                 time.sleep(1)
         except KeyboardInterrupt:
             print("\nプログラムを停止しました。")
-            mailDisco.mailDisco("--- メール監視システムを停止しました ---").send()
+            mailDisco.MailDisco("--- メール監視システムを停止しました ---").send()
 
     else:
         print("❌ サービスの初期化に失敗したため、プログラムを終了します。")
-        mailDisco.mailDisco("❌ サービスの初期化に失敗しました。プログラムを終了します。").send()
+        mailDisco.MailDisco("❌ サービスの初期化に失敗しました。プログラムを終了します。").send()
