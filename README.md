@@ -1,85 +1,82 @@
 # smbc-card-recorder
-三井住友カードの利用通知メールをGmailから取得し、Googleスプレッドシートに自動記録するPythonスクリプト。
-## 使い方
-### 仮想環境の作り方
-convertGmailForsheetディレクトリに移動
-#### 仮想環境の作成
-python3 -m venv <<仮想環境名:例venv>>
-`python3 -m venv venv`
-##### Windowsの場合
-.\venv\Scripts\Activate.ps1
-#### 仮想環境の立ち上げ
-source <<仮想環境名>>/bin/activate
-`source venv/bin/activate`
-#### ライブラリのインストール
-`pip install python-dotenv requests google-api-python-client google-auth-httplib2 google-auth-oauthlib gspread`
-`pip install schedule`
-`pip install python-dotenv`
-`pip install Flask`
-`pip install google-generativeai --break-system-packages`
-`sudo apt update`
-`sudo apt install -y php php-sqlite3`
-#### サーバーの起動
-`php -S 0.0.0.0:8080`
 
-## 必要なファイル
-### envファイル
-SERVICE_ACCOUNT_FILE,SPREADSHEET_ID,DISCORD_WEBHOOK_URL,GEMINI_API_KEYが必要
-#### SERVICE_ACCOUNT_FILEの取得方法
+三井住友カードの利用通知メールをGmailから取得し、Googleスプレッドシートに自動記録するPythonスクリプトです。Discordへのリアルタイム通知機能も備えています。
 
-#### SPREADSHEET_IDの取得方法
-GoogleスプレッドシートのIDは、そのシートの**URL**から簡単に取得できます。
+## ターゲット
+* 三井住友カードをメインの決済手段として使っている人
+* 家計簿の入力作業を完全に自動化したい人
 
-1.  ブラウザで、IDを知りたいGoogleスプレッドシートを開きます。
-2.  ブラウザのアドレスバーに表示されているURLを見ます。
+## 開発の動機
+一人暮らしをしており、日々の決済をほぼすべてクレジットカードで行っていました。そのため、「クレジットカードの決済履歴を自動でスプレッドシートに書き込めたら非常に便利だ」と感じたのが開発のきっかけです。
 
-URLは通常、以下のような形式になっています。
+### 既存サービスを採用しなかった理由
+マネーフォワードなどの既存の家計簿アプリやサービスも検討しましたが、以下の不満点があったため自作を決意しました。
+1. **店舗分類のカスタマイズ性がない:** 既存サービスでは、自分の生活スタイルに合わせた独自のカテゴリ分け（食費、日用品など）が思い通りにできませんでした。
+2. **Google Sheetsへの直接書き込みができない:** データを外部のGoogleスプレッドシートに直接、かつ無料で自動出力・同期してくれるサービスがありませんでした。
 
-`https://docs.google.com/spreadsheets/d/`**`[ここにある長い英数字の文字列]`**`/edit#gid=0`
+## 使用技術
+* **言語:** Python
+* **外部API・サービス:**
+  * Gmail API (利用通知メールの取得)
+  * Google Sheets API (スプレッドシートへの書き込み)
+  * Discord Webhook (処理結果のエラー・成功通知)
+* **認証方式:** OAuth2, サービスアカウント認証
 
-この、`/d/` と `/edit` の間にある長い英数字の文字列が **スプレッドシートID** です。
+### 技術選定の理由
+家計簿を管理する上で、**PCやスマートフォンなど「どの端末からでも手軽に閲覧・編集できる」ことが最も重要**だと考え、データ保存先としてGoogleスプレッドシート（Google Sheets API）を採用しました。また、それらのAPI操作やテキスト解析（正規表現）を簡潔に実装できるPythonを開発言語に選びました。
 
-##### 例
+## 開発中に困ったこと・工夫したこと
+* **メールの文字化け対策とデコード処理**
+  Gmail APIで取得したメール本文のデコード時、環境によって文字化けが発生する問題がありました。これに対し、通常のUTF-8だけでなく、日本のメールシステムで一般的な `iso-2022-jp` でのデコードに切り替えるフォールバック処理を実装することで、安定したデータ抽出を実現しました。
+* **データの重複登録防止**
+  定期実行でメールを確認する際、同じメールを何度も読み込んでしまうリスクがありました。処理済みメールのIDを記録・保持し、新規メール取得時に照合する仕組みを導入し、データが重複してスプレッドシートに書き込まれないよう工夫しました。
 
-##### もしURLが
-`https://docs.google.com/spreadsheets/d/`**`1aBcD_eFgHiJkLmNoPqRsTuVwXyZ_12345abcdefg`**`/edit`
+## 今後の改善点
+* **現金・口座振り込みへの対応:** 現金の引き出しや給与の振り込みなど、クレジットカード以外の入出金は現在手動で入力する必要があるため、これらを統合管理できる仕組みの検討。
+* **LLMを活用したカテゴリ分類の自動化:** 未知の店舗名でも文脈からカテゴリを推論できるよう、Gemini API等のLLM（大規模言語モデル）を組み込んだ自動分類機能の実装。
+* **エラーログの強化:** 問題発生時の原因究明をスムーズにするため、エラーをログファイルへ出力・記録する機能の追加。
 
-##### スプレッドシートIDは
-**`1aBcD_eFgHiJkLmNoPqRsTuVwXyZ_12345abcdefg`**
+---
 
-になります。
-#### DISCORD_WEBHOOK_URLの取得方法
+## 使い方（セットアップ手順）
 
-#### GEMINI_API_KEYの取得方法
-googleAIstudioから取得
-APIキーを作成をクリック
-任意のキーの名前を入力後、プロジェクトを作成、任意のプロジェクト名を入力し、キーを作成
+### 仮想環境の構築と起動
+`convertGmailForsheet` ディレクトリに移動し、以下のコマンドを実行します。
 
-#### envファイルの書き方
-```dotenv
-SERVICE_ACCOUNT_FILE="service_account.json"
-SPREADSHEET_ID='XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX'
-DISCORD_WEBHOOK_URL='https://discord.com/api/webhooks/your/webhook_url'
-GEMINI_API_KEY="AIXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+```bash
+# 仮想環境の作成
+python3 -m venv venv
+
+# 仮想環境の立ち上げ（Mac/Linux）
+source venv/bin/activate
+# Windowsの場合
+# .\venv\Scripts\Activate.ps1
+
+# 必要なライブラリのインストール
+pip install python-dotenv requests google-api-python-client google-auth-httplib2 google-auth-oauthlib gspread schedule Flask
 ```
-### credentials.json
-Gmail APIの初回ユーザー認証情報が保存されているファイル
-#### 取得方法
+### 必要な環境変数とファイル
+プロジェクトのルートディレクトリに .env ファイルを作成し、以下の情報を記述します。
 
-### your-service-account-file.json
-Googleスプレッドシートへのプログラム認証が保存されているファイル
-#### 取得方法
+```env
+SERVICE_ACCOUNT_FILE="service_account.json"
+SPREADSHEET_ID="XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+DISCORD_WEBHOOK_URL="[https://discord.com/api/webhooks/your/webhook_url](https://discord.com/api/webhooks/your/webhook_url)"
+```
+* SPREADSHEET_IDの取得方法:
+GoogleスプレッドシートのURL https://docs.google.com/spreadsheets/d/[ここにある長い英数字]/edit の部分をコピーして設定します。
+* service_account.json:
+Google Cloud Consoleから取得したGoogle Sheets API用のサービスアカウントキーを配置します。
+* credentials.json:
+Gmail APIの初回ユーザー認証情報を配置してください。
 
-## 作成されるファイル
-token.json,last_run.json,processed_ids.jsonが作成されます
+### スプレッドシートの権限設定
+1. 書き込み先のスプレッドシートを開き、右上の「共有」ボタンをクリックします。
 
-## スプレットシートの変更方法
-### 前提
-同じアカウントでのスプレットシートであること
-必要なファイルがディレクトリーにあること
-### 変更方法
-1.新しく書き込みたいスプレッドシートを開きます。
-2.envファイルのSPREADSHEET_IDを変更(SPREADSHEET_IDの取得方法を参照)
-3.右上の [共有] ボタンをクリックします。
-4.SERVICE_ACCOUNT_FILEに記載されている client_email のメールアドレス（例: my-service-account@my-project.iam.gserviceaccount.com のような形式）を「ユーザーやグループを追加」の欄に入力します。
-5.権限を「編集者」にして、[送信]（または[共有]）をクリックします。
+2. service_account.json に記載されている client_email のアドレスを追加し、権限を**「編集者」**にして送信します。
+
+### 実行方法
+```bash
+python mailSystem.py
+```
+初回起動時にブラウザが開いてGmailの認証が求められます。認証完了後、バックグラウンドで定期的にメールをチェックし、自動記録を開始します。
