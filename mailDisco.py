@@ -1,7 +1,7 @@
 import requests
 import os
 
-class mailDisco:
+class MailDisco:
     """
     Discord Webhookを使用してメッセージを通知するクラス。
 
@@ -9,7 +9,7 @@ class mailDisco:
     """
     def __init__(self,message):
         """
-        mailDisco クラスのインスタンスを初期化する。
+        MailDisco クラスのインスタンスを初期化する。
 
         :param message: Discordに送信するテキストメッセージ
         :type message: str

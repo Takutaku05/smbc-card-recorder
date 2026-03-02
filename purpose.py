@@ -1,7 +1,7 @@
 import csv
 import os
 
-class purpose:
+class Purpose:
     """
     利用場所（店名）に基づき、外部CSVファイルを使用して用途カテゴリを分類するクラス。
 
@@ -31,7 +31,7 @@ class purpose:
 
     def __init__(self, location):
         """
-        purpose クラスのインスタンスを初期化する。
+        Purpose クラスのインスタンスを初期化する。
 
         カテゴリ定義（_category_map）が未ロードの場合は、自動的に読み込み処理を実行する。
 
@@ -39,8 +39,8 @@ class purpose:
         :type location: str
         """
         self.location = location
-        if purpose._category_map is None:
-            purpose._load_categories()
+        if type(self)._category_map is None:
+            type(self)._load_categories()
 
     @classmethod
     def _load_categories(cls):
@@ -95,12 +95,12 @@ class purpose:
                  マッピングに存在しない場合、またはマップのロードに失敗している場合は None を返す。
         :rtype: str | None
         """
-        if purpose._category_map is None:
+        if Purpose._category_map is None:
             return None
 
         # 完全一致で検索
-        if self.location in purpose._category_map:
-            category = purpose._category_map[self.location]
+        if self.location in Purpose._category_map:
+            category = Purpose._category_map[self.location]
             print(f"'{self.location}' は {category} カテゴリに属します。")
             return category
         else:
