@@ -53,7 +53,7 @@ source venv/bin/activate
 # .\venv\Scripts\Activate.ps1
 
 # 必要なライブラリのインストール
-pip install python-dotenv requests google-api-python-client google-auth-httplib2 google-auth-oauthlib gspread schedule Flask
+pip install -r requirements.txt
 ```
 ### 必要な環境変数とファイル
 プロジェクトのルートディレクトリに .env ファイルを作成し、以下の情報を記述します。
