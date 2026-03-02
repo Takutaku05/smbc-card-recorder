@@ -61,7 +61,8 @@ pip install python-dotenv requests google-api-python-client google-auth-httplib2
 ```env
 SERVICE_ACCOUNT_FILE="service_account.json"
 SPREADSHEET_ID="XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-DISCORD_WEBHOOK_URL="[https://discord.com/api/webhooks/your/webhook_url](https://discord.com/api/webhooks/your/webhook_url)"
+DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/your/webhook_url"
+GEMINI_API_KEY="your_gemini_api_key"
 ```
 * SPREADSHEET_IDの取得方法:
 GoogleスプレッドシートのURL https://docs.google.com/spreadsheets/d/[ここにある長い英数字]/edit の部分をコピーして設定します。
