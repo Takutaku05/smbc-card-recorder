@@ -39,8 +39,8 @@ class Purpose:
         :type location: str
         """
         self.location = location
-        if Purpose._category_map is None:
-            Purpose._load_categories()
+        if type(self)._category_map is None:
+            type(self)._load_categories()
 
     @classmethod
     def _load_categories(cls):
