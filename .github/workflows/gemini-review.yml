@@ -20,4 +20,7 @@ jobs:
         with:
           gemini-key: ${{ secrets.GEMINI_API_KEY }} #
           github-token: ${{ secrets.GITHUB_TOKEN }} #
-          model: "gemini-pro-latest" #
+          model: "gemini-flash-latest" #
+          prompt: |
+            あなたは優秀なエンジニアです。提供されたPull Requestのコード差分をレビューしてください。
+            バグの可能性を重点に指摘を行い、必ず【日本語で】回答してください。 #
