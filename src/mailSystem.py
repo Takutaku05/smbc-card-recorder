@@ -6,8 +6,8 @@ import base64
 import re
 from dotenv import load_dotenv
 
-import mailDisco
-import purpose
+import src.mailDisco as mailDisco
+import src.purpose as purpose
 
 import schedule
 
@@ -22,9 +22,10 @@ import gspread
 # --- グローバル設定 ---
 load_dotenv()
 SCOPES_GMAIL = "https://www.googleapis.com/auth/gmail.readonly"
-TOKEN_FILE = "gmailtoken.json"
-LAST_RUN_FILE = "last_run_time.json"
-PROCESSED_IDS_FILE = "processed_message_ids.json"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TOKEN_FILE = os.path.join(BASE_DIR, "config", "gmailtoken.json")
+LAST_RUN_FILE = os.path.join(BASE_DIR, "config", "last_run_time.json")
+PROCESSED_IDS_FILE = os.path.join(BASE_DIR, "config", "processed_message_ids.json")
 SERVICE_ACCOUNT_FILE = os.getenv("SERVICE_ACCOUNT_FILE")
 SCOPES_SHEET = ['https://www.googleapis.com/auth/spreadsheets',
                 'https://www.googleapis.com/auth/drive']
@@ -321,12 +322,13 @@ def initialize_services():
                 return False
         else:
             try:
+                credentials_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config", "credentials.json")
                 flow = InstalledAppFlow.from_client_secrets_file(
-                    "credentials.json", [SCOPES_GMAIL]
+                    credentials_path, [SCOPES_GMAIL]
                 )
                 gmail_creds = flow.run_local_server(port=0)
             except FileNotFoundError:
-                print("❌ 'credentials.json' が見つかりません。")
+                print("❌ 'config/credentials.json' が見つかりません。")
                 return False
         
         with open(TOKEN_FILE, "w") as token:

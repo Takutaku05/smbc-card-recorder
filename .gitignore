@@ -210,6 +210,10 @@ __marimo__/
 # add
 .env
 config.py
-credentials.json
-token.json
-service_account.json
+config/credentials.json
+config/token.json
+config/service_account.json
+config/gmailtoken.json
+config/last_run_time.json
+config/processed_message_ids.json
+config/categories.csv
