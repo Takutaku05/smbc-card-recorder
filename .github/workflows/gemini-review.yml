@@ -1,0 +1,23 @@
+name: Gemini AI Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened] # PRの作成・更新・再オープン時に実行
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Gemini Code Review
+        uses: sshnaidm/gemini-code-review-action@v2 #
+        with:
+          gemini-key: ${{ secrets.GEMINI_API_KEY }} #
+          github-token: ${{ secrets.GITHUB_TOKEN }} #
+          model: "gemini-pro-latest" #
