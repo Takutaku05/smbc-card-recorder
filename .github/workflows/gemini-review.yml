@@ -20,4 +20,4 @@ jobs:
         with:
           gemini-key: ${{ secrets.GEMINI_API_KEY }} #
           github-token: ${{ secrets.GITHUB_TOKEN }} #
-          model: "gemini-pro-latest" #
+          model: "gemini-flash-latest" #
