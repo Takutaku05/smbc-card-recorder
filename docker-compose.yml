@@ -1,0 +1,11 @@
+services:
+  smbc-recorder:
+    build: .
+    container_name: smbc-recorder
+    restart: unless-stopped
+    volumes:
+      - ./config:/app/config
+    env_file:
+      - .env
+    environment:
+      - TZ=Asia/Tokyo
