@@ -56,8 +56,8 @@ class Purpose:
         """
         cls._category_map = {}
         
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        file_path = os.path.join(base_dir, cls.CSV_FILE)
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        file_path = os.path.join(base_dir, "config", cls.CSV_FILE)
 
         if not os.path.exists(file_path):
             print(f"⚠️ カテゴリファイル '{cls.CSV_FILE}' が見つかりません。")

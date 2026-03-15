@@ -210,6 +210,8 @@ __marimo__/
 # add
 .env
 config.py
-credentials.json
-token.json
-service_account.json
+
+# Ignore sensitive config files, but track examples
+config/*.json
+config/*.csv
+!config/*.example
