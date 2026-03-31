@@ -41,7 +41,7 @@
 ## 使い方（セットアップ手順）
 
 ### 仮想環境の構築と起動
-`convertGmailForsheet` ディレクトリに移動し、以下のコマンドを実行します。
+`smbc-card-recorder` ディレクトリに移動し、以下のコマンドを実行します。
 
 ```bash
 # 仮想環境の作成
@@ -59,17 +59,16 @@ pip install -r requirements.txt
 プロジェクトのルートディレクトリに .env ファイルを作成し、以下の情報を記述します。
 
 ```env
-SERVICE_ACCOUNT_FILE="service_account.json"
+SERVICE_ACCOUNT_FILE="config/service_account.json"
 SPREADSHEET_ID="XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
 DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/your/webhook_url"
-GEMINI_API_KEY="your_gemini_api_key"
 ```
 * SPREADSHEET_IDの取得方法:
 GoogleスプレッドシートのURL https://docs.google.com/spreadsheets/d/[ここにある長い英数字]/edit の部分をコピーして設定します。
-* service_account.json:
-Google Cloud Consoleから取得したGoogle Sheets API用のサービスアカウントキーを配置します。
-* credentials.json:
-Gmail APIの初回ユーザー認証情報を配置してください。
+* config/service_account.json:
+Google Cloud Consoleから取得したGoogle Sheets API用のサービスアカウントキーを `config` ディレクトリ内に配置します。
+* config/credentials.json:
+Gmail APIの初回ユーザー認証情報を `config` ディレクトリ内に配置してください。
 
 ### スプレッドシートの権限設定
 1. 書き込み先のスプレッドシートを開き、右上の「共有」ボタンをクリックします。
@@ -78,6 +77,6 @@ Gmail APIの初回ユーザー認証情報を配置してください。
 
 ### 実行方法
 ```bash
-python mailSystem.py
+python -m src.mailSystem
 ```
 初回起動時にブラウザが開いてGmailの認証が求められます。認証完了後、バックグラウンドで定期的にメールをチェックし、自動記録を開始します。
