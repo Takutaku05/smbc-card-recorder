@@ -212,6 +212,7 @@ __marimo__/
 config.py
 .DS_Store
 logs/
+.claude/
 
 # Ignore sensitive config files, but track examples
 config/*.json
