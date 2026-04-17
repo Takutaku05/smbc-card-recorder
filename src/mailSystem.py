@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 
 import src.mailDisco as mailDisco
 import src.purpose as purpose
+from src.logger_config import setup_logger
 
 import schedule
 
@@ -18,6 +19,9 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 import gspread
+
+# --- ロガーの初期化 ---
+logger = setup_logger(__name__)
 
 # --- グローバル設定 ---
 load_dotenv()
@@ -49,7 +53,7 @@ def decode_base64_url_safe(data):
     :return: デコードされた文字列
     :rtype: str
     """
-    decoded_bytes = base64.urlsafe_b64decode(data + '=' * (4 - len(data) % 4))
+    decoded_bytes = base64.urlsafe_b64decode(data + '=' * ((-len(data)) % 4))
     try:
         # まずUTF-8で実行
         return decoded_bytes.decode('utf-8')
@@ -94,7 +98,7 @@ def get_last_run_time():
                 data = json.load(f)
                 return datetime.datetime.fromisoformat(data.get("last_run_time"))
             except (json.JSONDecodeError, TypeError, ValueError):
-                print("⚠️前回の実行日時ファイルが不正です。新しく作成します。")
+                logger.warning("前回の実行日時ファイルが不正です。新しく作成します。")
                 return None
     return None
 
@@ -119,12 +123,12 @@ def load_processed_ids():
             with open(PROCESSED_IDS_FILE, "r") as f:
                 ids_list = json.load(f)
                 processed_ids = set(ids_list)
-                print(f"ℹ️ 処理済みメールIDを {len(processed_ids)} 件ロードしました。")
+                logger.info("処理済みメールIDを %d 件ロードしました。", len(processed_ids))
         except (json.JSONDecodeError, TypeError) as e:
-            print(f"⚠️処理済みメールIDファイル '{PROCESSED_IDS_FILE}' が不正です。新しく作成します。エラー: {e}")
+            logger.warning("処理済みメールIDファイル '%s' が不正です。新しく作成します。エラー: %s", PROCESSED_IDS_FILE, e)
             processed_ids = set()
     else:
-        print(f"ℹ️処理済みメールIDファイル '{PROCESSED_IDS_FILE}' が見つかりません。新しく作成します。")
+        logger.info("処理済みメールIDファイル '%s' が見つかりません。新しく作成します。", PROCESSED_IDS_FILE)
         processed_ids = set()
 
 def save_processed_ids():
@@ -136,7 +140,7 @@ def save_processed_ids():
         with open(PROCESSED_IDS_FILE, "w") as f:
             json.dump(list(processed_ids), f)
     except IOError as e:
-        print(f"❌処理済みメールIDの保存中にエラーが発生しました: {e}")
+        logger.error("処理済みメールIDの保存中にエラーが発生しました: %s", e)
 
 
 def system(mes_body):
@@ -161,12 +165,9 @@ def system(mes_body):
             utilization_amount = int(cleaned_amount_str)
         except ValueError:
             utilization_amount = utilization_amount_str
-            print(f"⚠️ 金額 '{utilization_amount_str}' を数値に変換できませんでした。")
+            logger.warning("金額 '%s' を数値に変換できませんでした。", utilization_amount_str)
     
-    print(f"抽出結果:")
-    print(f"  利用日: {utilization_datetime}")
-    print(f"  利用先: {utilization_location}")
-    print(f"  利用金額: {utilization_amount}")
+    logger.info("抽出結果: 利用日=%s, 利用先=%s, 利用金額=%s", utilization_datetime, utilization_location, utilization_amount)
     
     sheet(utilization_datetime, utilization_location, utilization_amount)
 
@@ -190,21 +191,21 @@ def sheet(email_time, location, money):
     global gc
 
     if gc is None:
-        print("❌ GSpread認証が完了していません。データを書き込めません。")
+        logger.error("GSpread認証が完了していません。データを書き込めません。")
         return
 
     try:
         spreadsheet = gc.open_by_key(SPREADSHEET_ID)
         if email_time == "N/A":
-            print("⚠️ 利用日が抽出できませんでした。")
+            logger.warning("利用日が抽出できませんでした。")
             mailDisco.MailDisco("⚠️ 利用日が抽出できませんでした。").send()
             sheet_name = f'{datetime.datetime.now().month}月'
         elif location == "N/A":
-            print("⚠️ 利用先が抽出できませんでした。")
+            logger.warning("利用先が抽出できませんでした。")
             mailDisco.MailDisco("⚠️ 利用先が抽出できませんでした。").send()
             sheet_name = "Sheet1"
         elif money == "N/A":
-            print("⚠️ 利用金額が抽出できませんでした。")
+            logger.warning("利用金額が抽出できませんでした。")
             mailDisco.MailDisco("⚠️ 利用金額が抽出できませんでした。").send()
             sheet_name = "Sheet1"
         else:
@@ -214,13 +215,13 @@ def sheet(email_time, location, money):
         try:
             worksheet = spreadsheet.worksheet(sheet_name)
         except gspread.exceptions.WorksheetNotFound:
-            print(f"❌ ワークシート '{sheet_name}' が見つかりません。")
+            logger.error("ワークシート '%s' が見つかりません。", sheet_name)
             try:
-                print(f"    ...フォールバックとして 'Sheet1' への書き込みを試みます。")
+                logger.info("フォールバックとして 'Sheet1' への書き込みを試みます。")
                 worksheet = spreadsheet.worksheet("Sheet1")
                 mailDisco.MailDisco(f"⚠️ ワークシート '{sheet_name}' が見つからず、 'Sheet1' に書き込みました。").send()
             except gspread.exceptions.WorksheetNotFound:
-                print(f"❌ ワークシート 'Sheet1' も見つかりません。書き込みを中止します。")
+                logger.error("ワークシート 'Sheet1' も見つかりません。書き込みを中止します。")
                 return
 
         
@@ -235,15 +236,15 @@ def sheet(email_time, location, money):
         try:
             all_values = worksheet.get_all_values()
         except Exception as e_get_values:
-            print(f"⚠️ ワークシートの値の取得に失敗しました: {e_get_values}。末尾に追加を試みます。")
+            logger.warning("ワークシートの値の取得に失敗しました: %s。末尾に追加を試みます。", e_get_values)
             worksheet.append_row(data_to_log)
-            print(f"✅ ワークシートの値取得に失敗したため、最終行にデータ '{data_to_log}' が追加されました。")
+            logger.info("ワークシートの値取得に失敗したため、最終行にデータ '%s' が追加されました。", data_to_log)
             return
 
         target_row_index = -1
         if not all_values: # シートが完全に空の場合
             worksheet.append_row(data_to_log)
-            print(f"✅ シートが空だったため、1行目にデータ '{data_to_log}' が追加されました。")
+            logger.info("シートが空だったため、1行目にデータ '%s' が追加されました。", data_to_log)
             return
         
         # 3行目(index 2)以降でA列が空の行を探すロジック
@@ -254,16 +255,16 @@ def sheet(email_time, location, money):
         
         if target_row_index == -1: # A列が空の行で見つからなかった場合
             worksheet.append_row(data_to_log)
-            print(f"✅ A列が空の行が見つからなかったため、最終行にデータ '{data_to_log}' が追加されました。")
+            logger.info("A列が空の行が見つからなかったため、最終行にデータ '%s' が追加されました。", data_to_log)
         else:
             range_to_update = f"A{target_row_index}:D{target_row_index}"
             worksheet.update(values=[data_to_log], range_name=range_to_update)
-            print(f"✅ {target_row_index}行目 ({range_to_update}) にデータ '{data_to_log}' が追加されました。")
+            logger.info("%d行目 (%s) にデータ '%s' が追加されました。", target_row_index, range_to_update, data_to_log)
 
     except gspread.exceptions.SpreadsheetNotFound:
-        print(f"❌ スプレッドシートが見つかりません。IDが正しいか確認してください: {SPREADSHEET_ID}")
+        logger.error("スプレッドシートが見つかりません。IDが正しいか確認してください: %s", SPREADSHEET_ID)
     except Exception as e:
-        print(f"❌ スプレッドシートへの書き込み中に予期せぬエラーが発生しました: {e}")
+        logger.error("スプレッドシートへの書き込み中に予期せぬエラーが発生しました: %s", e, exc_info=True)
 
 def timesheet(time):
     """
@@ -286,7 +287,7 @@ def timesheet(time):
             time_object = datetime.datetime.strptime(time, '%Y/%m/%d %H:%M')
         except ValueError:
             # どちらも失敗した場合
-            print(f"⚠️ timesheet関数: 日付 '{time}' の形式が不正です。デフォルトの月を使用します。")
+            logger.warning("timesheet関数: 日付 '%s' の形式が不正です。デフォルトの月を使用します。", time)
             return f'{datetime.datetime.now().month}月'
     
     return f'{time_object.month}月'
@@ -304,7 +305,7 @@ def initialize_services():
     """
     global gc, gmail_service
 
-    print("--- サービス初期化開始 ---")
+    logger.info("--- サービス初期化開始 ---")
     
     # Gmail認証
     gmail_creds = None
@@ -315,10 +316,10 @@ def initialize_services():
         if gmail_creds and gmail_creds.expired and gmail_creds.refresh_token:
             try:
                 gmail_creds.refresh(Request())
-                print("ℹ️ Gmailトークンをリフレッシュしました。")
+                logger.info("Gmailトークンをリフレッシュしました。")
             except Exception as e:
-                print(f"❌ Gmailトークンのリフレッシュに失敗: {e}")
-                print("   'credentials.json' を確認し、 'gmailtoken.json' を削除して再認証してください。")
+                logger.error("Gmailトークンのリフレッシュに失敗: %s", e, exc_info=True)
+                logger.error("'credentials.json' を確認し、 'gmailtoken.json' を削除して再認証してください。")
                 return False
         else:
             try:
@@ -328,7 +329,7 @@ def initialize_services():
                 )
                 gmail_creds = flow.run_local_server(port=0)
             except FileNotFoundError:
-                print("❌ 'config/credentials.json' が見つかりません。")
+                logger.error("'config/credentials.json' が見つかりません。")
                 return False
         
         with open(TOKEN_FILE, "w") as token:
@@ -336,27 +337,27 @@ def initialize_services():
 
     try:
         gmail_service = build("gmail", "v1", credentials=gmail_creds)
-        print("✅ Gmail APIサービスに接続しました。")
+        logger.info("Gmail APIサービスに接続しました。")
     except HttpError as error:
-        print(f"❌ Gmail APIサービスへの接続中にエラーが発生しました: {error}")
+        logger.error("Gmail APIサービスへの接続中にエラーが発生しました: %s", error, exc_info=True)
         return False # 初期化失敗
 
     # GSpread認証
     try:
         if not SERVICE_ACCOUNT_FILE:
-            print("❌ 環境変数 'SERVICE_ACCOUNT_FILE' が設定されていません。 .envファイルを確認してください。")
+            logger.error("環境変数 'SERVICE_ACCOUNT_FILE' が設定されていません。 .envファイルを確認してください。")
             return False
         gc = gspread.service_account(filename=SERVICE_ACCOUNT_FILE, scopes=SCOPES_SHEET)
-        print("✅ Google スプレッドシートAPIに接続しました。")
+        logger.info("Google スプレッドシートAPIに接続しました。")
     except FileNotFoundError:
-        print(f"❌ サービスアカウントファイル '{SERVICE_ACCOUNT_FILE}' が見つかりません。 (.envファイルを確認してください)")
+        logger.error("サービスアカウントファイル '%s' が見つかりません。 (.envファイルを確認してください)", SERVICE_ACCOUNT_FILE)
         return False
     except Exception as e:
-        print(f"❌ Google スプレッドシートAPIの認証エラー: {e}")
-        print("   サービスアカウントのメールアドレスをスプレッドシートに共有（編集者権限）したか確認してください。")
+        logger.error("Google スプレッドシートAPIの認証エラー: %s", e, exc_info=True)
+        logger.error("サービスアカウントのメールアドレスをスプレッドシートに共有（編集者権限）したか確認してください。")
         return False # 初期化失敗
     
-    print("--- サービス初期化完了 ---")
+    logger.info("--- サービス初期化完了 ---")
     return True # 初期化成功
 
 def check_mail_job():
@@ -374,10 +375,10 @@ def check_mail_job():
     global gc, gmail_service, processed_ids
 
     if gmail_service is None or gc is None:
-        print("❌ サービスが初期化されていません。ジョブを実行できません。")
+        logger.error("サービスが初期化されていません。ジョブを実行できません。")
         return 
 
-    print(f"\n--- {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}: 定時メールチェック実行 ---")
+    logger.info("--- %s: 定時メールチェック実行 ---", datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
     
     current_check_time = datetime.datetime.now()
     last_check_time = get_last_run_time()
@@ -387,9 +388,9 @@ def check_mail_job():
     if last_check_time:
         timestamp = int(last_check_time.timestamp())
         query += f" after:{timestamp}"
-        print(f"  最終チェック日時 ({last_check_time.strftime('%Y-%m-%d %H:%M:%S')}) 以降を検索。")
+        logger.info("最終チェック日時 (%s) 以降を検索。", last_check_time.strftime('%Y-%m-%d %H:%M:%S'))
     else:
-        print(f"  初回チェックまたは日時不明。対象件名の全メールを検索候補とします。")
+        logger.info("初回チェックまたは日時不明。対象件名の全メールを検索候補とします。")
 
     try:
         results = (
@@ -401,10 +402,10 @@ def check_mail_job():
         messages = results.get("messages", [])
 
         if not messages:
-            print(f"  新しい対象メールは見つかりませんでした。")
+            logger.info("新しい対象メールは見つかりませんでした。")
         else:
             new_messages_processed_count = 0
-            print(f"  {len(messages)} 件の候補メールが見つかりました。処理を開始します。")
+            logger.info("%d 件の候補メールが見つかりました。処理を開始します。", len(messages))
 
             for message_info in messages:
                 message_id = message_info["id"]
@@ -413,7 +414,7 @@ def check_mail_job():
                     continue
                 
                 new_messages_processed_count +=1
-                print(f"\n  処理中のメールID: {message_id}")
+                logger.info("処理中のメールID: %s", message_id)
                 try:
                     msg_detail = (
                         gmail_service.users()
@@ -429,38 +430,38 @@ def check_mail_job():
                             subject = header["value"]
                             break
                     
-                    print(f"  - 件名: {subject}")
+                    logger.info("件名: %s", subject)
 
                     body = get_email_body(msg_detail["payload"])
                     if body:
                         system(body)
                         processed_ids.add(message_id)
-                        print(f"    ✅ メールID {message_id} の処理が完了し、処理済みとしてマークしました。")
+                        logger.info("メールID %s の処理が完了し、処理済みとしてマークしました。", message_id)
                     else:
-                        print(f"    ⚠️ メールID {message_id} の本文が見つかりませんでした。スキップします。")
+                        logger.warning("メールID %s の本文が見つかりませんでした。スキップします。", message_id)
                         processed_ids.add(message_id)
                 
                 except HttpError as e_msg_get:
-                    print(f"  ❌ メールID {message_id} の詳細取得中にエラー: {e_msg_get}")
+                    logger.error("メールID %s の詳細取得中にエラー: %s", message_id, e_msg_get)
                 except Exception as e_proc:
-                    print(f"  ❌ メールID {message_id} の処理中に予期せぬエラー: {e_proc}")
+                    logger.error("メールID %s の処理中に予期せぬエラー: %s", message_id, e_proc, exc_info=True)
 
             if new_messages_processed_count > 0:
-                 print(f"  --- {new_messages_processed_count} 件の新しいメールの処理が完了しました。 ---")
+                 logger.info("%d 件の新しいメールの処理が完了しました。", new_messages_processed_count)
             else:
-                 print(f"  新しい未処理メールはありませんでした（処理済みを除く）。")
+                 logger.info("新しい未処理メールはありませんでした（処理済みを除く）。")
         
         save_current_run_time(current_check_time)
         save_processed_ids()
 
     except HttpError as error:
-        print(f"❌ Gmail API呼び出し中にエラーが発生しました: {error}")
+        logger.error("Gmail API呼び出し中にエラーが発生しました: %s", error, exc_info=True)
         mailDisco.MailDisco("❌ Gmail API呼び出し中にエラーが発生しました").send()
     except Exception as e:
-        print(f"❌ ジョブ実行で予期せぬエラーが発生しました: {e}")
+        logger.error("ジョブ実行で予期せぬエラーが発生しました: %s", e, exc_info=True)
         mailDisco.MailDisco("ジョブ実行で予期せぬエラーが発生しました").send()
 
-    print(f"--- {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}: メールチェック完了 ---")
+    logger.info("--- %s: メールチェック完了 ---", datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
 
 
 
@@ -471,7 +472,7 @@ if __name__ == "__main__":
     load_processed_ids() # 最初に処理済みIDをロード
 
     if initialize_services(): # サービス初期化
-        print("✅ サービス初期化完了。スケジューラーを開始します。")
+        logger.info("サービス初期化完了。スケジューラーを開始します。")
         mailDisco.MailDisco("--- メール監視システムを起動しました ---").send()
 
         # スケジュールの設定
@@ -480,24 +481,24 @@ if __name__ == "__main__":
 
 
         
-        print(f"スケジューラーを実行中です。")
-        print(f"次回の実行は {schedule.next_run().strftime('%Y-%m-%d %H:%M:%S')} です。")
+        logger.info("スケジューラーを実行中です。")
+        logger.info("次回の実行は %s です。", schedule.next_run().strftime('%Y-%m-%d %H:%M:%S'))
         
         # 起動時にすぐ実行したい場合は、以下のコメントを解除
-        print("初回実行中...")
+        logger.info("初回実行中...")
         check_mail_job()
         time.sleep(1)
 
-        print("初回実行完了。")
+        logger.info("初回実行完了。")
 
         try:
             while True:
                 schedule.run_pending()
                 time.sleep(1)
         except KeyboardInterrupt:
-            print("\nプログラムを停止しました。")
+            logger.info("プログラムを停止しました。")
             mailDisco.MailDisco("--- メール監視システムを停止しました ---").send()
 
     else:
-        print("❌ サービスの初期化に失敗したため、プログラムを終了します。")
+        logger.error("サービスの初期化に失敗したため、プログラムを終了します。")
         mailDisco.MailDisco("❌ サービスの初期化に失敗しました。プログラムを終了します。").send()
