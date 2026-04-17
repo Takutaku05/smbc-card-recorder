@@ -2,27 +2,18 @@ import logging
 import os
 from logging.handlers import TimedRotatingFileHandler
 
-def setup_logger(name="smbc_card_recorder"):
-    """
-    アプリケーション共通のロガーをセットアップする。
+_ROOT_LOGGER_NAME = "smbc_card_recorder"
 
-    コンソール出力と日付ローテーション付きファイル出力の両方を設定する。
-    ログファイルはプロジェクトルートの ``logs/`` ディレクトリに出力される。
 
-    :param name: ロガー名（デフォルト: "smbc_card_recorder"）
-    :type name: str
-    :return: 設定済みのロガーインスタンス
-    :rtype: logging.Logger
-    """
-    logger = logging.getLogger(name)
+def _init_root_logger():
+    """親ロガーにハンドラを一度だけ設定する。"""
+    logger = logging.getLogger(_ROOT_LOGGER_NAME)
 
-    # 既にハンドラが設定されている場合は再設定しない
     if logger.handlers:
         return logger
 
     logger.setLevel(logging.DEBUG)
 
-    # ログ出力フォーマット
     formatter = logging.Formatter(
         fmt="%(asctime)s [%(levelname)s] [%(name)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
@@ -46,9 +37,28 @@ def setup_logger(name="smbc_card_recorder"):
         backupCount=30,        # 30日分保持
         encoding="utf-8",
     )
-    file_handler.suffix = "%Y-%m-%d"  # ローテーション後のファイル名: app.log.2026-04-17
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
 
     return logger
+
+
+def setup_logger(name=None):
+    """
+    アプリケーション共通のロガーを取得する。
+
+    親ロガー（smbc_card_recorder）にハンドラを一度だけ設定し、
+    各モジュールは子ロガーとしてハンドラを共有する。
+
+    :param name: モジュール名。指定時は子ロガーを返す。
+    :type name: str | None
+    :return: 設定済みのロガーインスタンス
+    :rtype: logging.Logger
+    """
+    _init_root_logger()
+
+    if name:
+        return logging.getLogger(f"{_ROOT_LOGGER_NAME}.{name}")
+
+    return logging.getLogger(_ROOT_LOGGER_NAME)
