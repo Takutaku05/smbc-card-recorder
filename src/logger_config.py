@@ -41,6 +41,18 @@ def _init_root_logger():
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
 
+    # --- エラーログ専用ハンドラ（ERROR以上のみ） ---
+    error_handler = TimedRotatingFileHandler(
+        filename=os.path.join(log_dir, "error.log"),
+        when="midnight",
+        interval=1,
+        backupCount=30,
+        encoding="utf-8",
+    )
+    error_handler.setLevel(logging.ERROR)
+    error_handler.setFormatter(formatter)
+    logger.addHandler(error_handler)
+
     return logger
 
 
