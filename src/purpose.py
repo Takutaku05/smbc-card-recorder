@@ -1,5 +1,8 @@
 import csv
 import os
+from src.logger_config import setup_logger
+
+logger = setup_logger(__name__)
 
 class Purpose:
     """
@@ -60,7 +63,7 @@ class Purpose:
         file_path = os.path.join(base_dir, "config", cls.CSV_FILE)
 
         if not os.path.exists(file_path):
-            print(f"⚠️ カテゴリファイル '{cls.CSV_FILE}' が見つかりません。")
+            logger.warning("カテゴリファイル '%s' が見つかりません。", cls.CSV_FILE)
             return
 
         try:
@@ -70,7 +73,7 @@ class Purpose:
                 for i, row in enumerate(reader):
                     # 行番号が定義数を超えていたら無視（または拡張）
                     if i >= len(cls.CATEGORY_ORDER):
-                        print(f"⚠️ {i+1}行目のデータはカテゴリ定義がないためスキップされました: {row}")
+                        logger.warning("%d行目のデータはカテゴリ定義がないためスキップされました: %s", i + 1, row)
                         continue
                     
                     category = cls.CATEGORY_ORDER[i]
@@ -80,10 +83,10 @@ class Purpose:
                         if store_name: # 空文字でなければ登録
                             cls._category_map[store_name] = category
             
-            print(f"ℹ️ カテゴリ定義をロードしました: {len(cls._category_map)}件")
+            logger.info("カテゴリ定義をロードしました: %d件", len(cls._category_map))
 
         except Exception as e:
-            print(f"❌ カテゴリ定義ファイルの読み込み中にエラーが発生しました: {e}")
+            logger.error("カテゴリ定義ファイルの読み込み中にエラーが発生しました: %s", e, exc_info=True)
 
     def judge(self):
         """
@@ -101,8 +104,8 @@ class Purpose:
         # 完全一致で検索
         if self.location in Purpose._category_map:
             category = Purpose._category_map[self.location]
-            print(f"'{self.location}' は {category} カテゴリに属します。")
+            logger.info("'%s' は %s カテゴリに属します。", self.location, category)
             return category
         else:
-            print(f"'{self.location}' はどのカテゴリにも見つかりませんでした。")
+            logger.info("'%s' はどのカテゴリにも見つかりませんでした。", self.location)
             return None
