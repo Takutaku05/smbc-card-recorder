@@ -53,7 +53,7 @@ def decode_base64_url_safe(data):
     :return: デコードされた文字列
     :rtype: str
     """
-    decoded_bytes = base64.urlsafe_b64decode(data + '=' * (4 - len(data) % 4))
+    decoded_bytes = base64.urlsafe_b64decode(data + '=' * ((-len(data)) % 4))
     try:
         # まずUTF-8で実行
         return decoded_bytes.decode('utf-8')
