@@ -10,7 +10,7 @@ class MailDisco:
 
     :ivar str message: 送信するメッセージの内容
     """
-    def __init__(self,message):
+    def __init__(self, message):
         """
         MailDisco クラスのインスタンスを初期化する。
 
