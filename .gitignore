@@ -210,11 +210,12 @@ __marimo__/
 # add
 .env
 config.py
-.DS_Store
 logs/
-.claude/
 
 # Ignore sensitive config files, but track examples
 config/*.json
 config/*.csv
 !config/*.example
+
+.DS_Store
+.claude/

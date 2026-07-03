@@ -396,8 +396,8 @@ def check_mail_job():
         results = (
             gmail_service.users()
             .messages()
-            .list(userId="me", q=query) 
-            .execute()
+            .list(userId="me", q=query)
+            .execute(num_retries=3)
         )
         messages = results.get("messages", [])
 
@@ -420,7 +420,7 @@ def check_mail_job():
                         gmail_service.users()
                         .messages()
                         .get(userId="me", id=message_id, format="full")
-                        .execute()
+                        .execute(num_retries=3)
                     )
                     
                     headers = msg_detail["payload"]["headers"]
