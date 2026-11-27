@@ -81,6 +81,18 @@ _refresh_error_notified = False
 # sheet() の戻り値: 抽出失敗(N/A)のため記録をスキップした（再試行しても結果が変わらないため処理済み扱いにする）
 SHEET_SKIPPED = "skipped"
 
+# sheet() の書き込み失敗通知を送るか。check_mail_job が再試行中のメールでは False にし、
+# Sheets 障害中に「滞留メール数 × 再試行回数」の通知が届かないようにする（打ち切り時は別途通知される）
+_sheet_failure_notify_enabled = True
+
+
+def _notify_sheet_failure(message):
+    """sheet() の書き込み失敗を Discord に通知する（再試行中のメールでは送らずログのみ）。"""
+    if _sheet_failure_notify_enabled:
+        mailDisco.MailDisco(message).send()
+    else:
+        logger.info("再試行中のメールのため書き込み失敗の通知を省略しました。")
+
 
 class BoundedBackOffHTTPClient(gspread.http_client.HTTPClient):
     """
@@ -113,8 +125,14 @@ class BoundedBackOffHTTPClient(gspread.http_client.HTTPClient):
             try:
                 return super().request(method, endpoint, *args, **kwargs)
             except gspread.exceptions.APIError as err:
+                # HTML の 502/503/504 等で JSON を解析できないと err.code は -1 になるため、HTTP ステータスで補う
+                status_code = (
+                    err.code
+                    if isinstance(err.code, int) and err.code > 0
+                    else getattr(err.response, "status_code", -1)
+                )
                 if attempt >= self.MAX_RETRIES or not self._should_retry(
-                    method, err.code
+                    method, status_code
                 ):
                     raise
                 wait_seconds = min(
@@ -123,7 +141,7 @@ class BoundedBackOffHTTPClient(gspread.http_client.HTTPClient):
                 attempt += 1
                 logger.warning(
                     "Sheets API がエラー (%s) を返しました。%d秒後に再試行します (%d/%d)。",
-                    err.code,
+                    status_code,
                     wait_seconds,
                     attempt,
                     self.MAX_RETRIES,
@@ -200,8 +218,12 @@ def _html_to_text(html_body):
     :return: プレーンテキスト化された文字列
     :rtype: str
     """
+    # <head>（<title> 等）は表示されない領域のため、本文として抽出しない
     text = re.sub(
-        r"<style\b[^>]*>.*?</style>", "", html_body, flags=re.IGNORECASE | re.DOTALL
+        r"<head\b[^>]*>.*?</head>", "", html_body, flags=re.IGNORECASE | re.DOTALL
+    )
+    text = re.sub(
+        r"<style\b[^>]*>.*?</style>", "", text, flags=re.IGNORECASE | re.DOTALL
     )
     text = re.sub(
         r"<script\b[^>]*>.*?</script>", "", text, flags=re.IGNORECASE | re.DOTALL
@@ -209,7 +231,10 @@ def _html_to_text(html_body):
     # HTML ソース上の改行・インデントは表示に影響しないため空白1つへ正規化し、
     # 整形済みテーブル（<td>ご利用場所：</td>\n  <td>店名</td>）で項目名と値が別行に分かれないようにする
     text = re.sub(r"\s+", " ", text)
-    text = re.sub(r"<br\s*/?>|</tr>|</p>|</div>|</li>", "\n", text, flags=re.IGNORECASE)
+    # <br class="..."> のような属性付きの <br> も改行にする
+    text = re.sub(
+        r"<br\b[^>]*>|</tr>|</p>|</div>|</li>", "\n", text, flags=re.IGNORECASE
+    )
     text = re.sub(r"</t[dh]>", " ", text, flags=re.IGNORECASE)
     text = re.sub(r"<[^>]+>", "", text)
     return html.unescape(text)
@@ -652,9 +677,9 @@ def sheet(email_time, location, money):
                 logger.error(
                     "ワークシート 'Sheet1' も見つかりません。書き込みを中止します。"
                 )
-                mailDisco.MailDisco(
+                _notify_sheet_failure(
                     f"❌ ワークシート '{sheet_name}' も 'Sheet1' も見つからず、利用先: {location} / 金額: {money} を記録できませんでした。"
-                ).send()
+                )
                 return False
 
         def _notify_write_success(written_pos):
@@ -730,9 +755,9 @@ def sheet(email_time, location, money):
             "スプレッドシートが見つかりません。IDが正しいか確認してください: %s",
             SPREADSHEET_ID,
         )
-        mailDisco.MailDisco(
+        _notify_sheet_failure(
             f"❌ スプレッドシートが見つからず、利用先: {location} / 金額: {money} を記録できませんでした。SPREADSHEET_IDを確認してください。"
-        ).send()
+        )
         return False
     except Exception as e:
         # シート削除・リネーム等でキャッシュが無効になっている可能性があるため破棄し、次回は再取得する
@@ -743,9 +768,9 @@ def sheet(email_time, location, money):
             e,
             exc_info=True,
         )
-        mailDisco.MailDisco(
+        _notify_sheet_failure(
             f"❌ スプレッドシートへの書き込みに失敗しました。\n利用先: {location} / 金額: {money}\nエラー: {e}"
-        ).send()
+        )
         return False
 
 
@@ -780,6 +805,24 @@ def timesheet(time):
     return f"{time_object.month}月"
 
 
+def _is_valid_datetime(text):
+    """
+    ``YYYY/M/D H:MM`` または ``YYYY/M/D H:MM:SS`` 形式の日時文字列が暦上有効かを判定する。
+
+    :param text: 正規化済みの日時文字列
+    :type text: str
+    :return: 有効な日時であれば True
+    :rtype: bool
+    """
+    for fmt in ("%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M"):
+        try:
+            datetime.datetime.strptime(text, fmt)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
 def parse_mail_body(mes_body):
     """
     メール本文から利用日時・利用先・利用金額を抽出する純粋関数（外部I/Oなし）。
@@ -796,6 +839,12 @@ def parse_mail_body(mes_body):
     if utilization_datetime_match:
         raw_dt = utilization_datetime_match.group(1)
         utilization_datetime = re.sub(r"[\s　]+", " ", raw_dt.strip()).replace("-", "/")
+        if not _is_valid_datetime(utilization_datetime):
+            # 13月や25時など暦上ありえない日時は、現在月シートへ誤記録しないよう抽出失敗として扱う
+            logger.warning(
+                "日時 '%s' が暦上不正なため N/A として扱います。", utilization_datetime
+            )
+            utilization_datetime = "N/A"
     else:
         utilization_datetime = "N/A"
 
@@ -1105,7 +1154,7 @@ def check_mail_job():
     :return: なし
     :rtype: None
     """
-    global gc, gmail_service, processed_ids
+    global gc, gmail_service, processed_ids, _sheet_failure_notify_enabled
 
     if gmail_service is None or gc is None:
         logger.error("サービスが初期化されていません。ジョブを実行できません。")
@@ -1175,7 +1224,6 @@ def check_mail_job():
 
         had_failure = False
         interrupted = False
-        failure_counts_changed = False
 
         if not messages:
             logger.info("新しい対象メールは見つかりませんでした。")
@@ -1223,7 +1271,14 @@ def check_mail_job():
 
                     body = get_email_body(msg_detail["payload"])
                     if body:
-                        result = system(body)
+                        # 書き込み失敗の詳細通知は初回の試行時のみ送る
+                        _sheet_failure_notify_enabled = (
+                            message_id not in _message_failure_counts
+                        )
+                        try:
+                            result = system(body)
+                        finally:
+                            _sheet_failure_notify_enabled = True
                         if result == SHEET_SKIPPED:
                             # 抽出失敗は再試行しても解消しないため処理済みにし、永久リトライを防ぐ（通知は sheet() 内で送信済み）
                             processed_ids.add(message_id)
@@ -1269,14 +1324,15 @@ def check_mail_job():
                     )
                     failure_reason = f"処理中に予期せぬエラーが発生しました ({e_proc})"
 
+                # 失敗回数は変更のたびに保存し、後続メールで RefreshError 等により中断されても失われないようにする
                 if failure_reason is None:
                     if _message_failure_counts.pop(message_id, None) is not None:
-                        failure_counts_changed = True
+                        save_message_failure_counts()
                 else:
-                    failure_counts_changed = True
                     gave_up = _record_message_failure(
                         message_id, subject, failure_reason, notify_first=notify_first
                     )
+                    save_message_failure_counts()
                     if gave_up:
                         saved_in_loop = True
                     else:
@@ -1300,8 +1356,6 @@ def check_mail_job():
             )
         else:
             save_current_run_time(current_check_time)
-        if failure_counts_changed:
-            save_message_failure_counts()
         if not saved_in_loop:
             save_processed_ids()
         _persist_refreshed_token_if_needed()
@@ -1388,3 +1442,5 @@ if __name__ == "__main__":
         mailDisco.MailDisco(
             "❌ サービスの初期化に失敗しました。プログラムを終了します。"
         ).send()
+        # systemd の Restart=on-failure で自動再起動されるよう、異常終了コードで終了する
+        raise SystemExit(1)

@@ -79,6 +79,8 @@ class TestMainEntrypointExtra:
         assert result["disco_messages"] == [
             "❌ サービスの初期化に失敗しました。プログラムを終了します。"
         ]
+        # systemd の Restart=on-failure が発動するよう非ゼロで終了する
+        assert result["exit_code"] == 1
         result["run_pending"].assert_not_called()
         result["sleep"].assert_not_called()
         assert schedule_mod.jobs == []
@@ -106,6 +108,7 @@ class TestMainEntrypointExtra:
                 signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
 
         result = _run_main(on_sleep=_on_sleep)
+        assert result["exit_code"] is None  # 正常停止（終了コード 0）
 
         # 1回目: 初回実行後の sleep、2回目: ループ内の sleep（ここで SIGTERM）→ ループを抜ける
         assert result["sleep"].call_count == 2

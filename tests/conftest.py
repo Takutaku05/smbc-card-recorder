@@ -149,6 +149,7 @@ def run_main_block(
     repo_base_dir = os.path.dirname(os.path.dirname(real_mail_system_file))
     prev_sigterm = signal.getsignal(signal.SIGTERM)
     events = []
+    exit_code = None
 
     with tempfile.TemporaryDirectory() as sandbox_str:
         sandbox = Path(sandbox_str)
@@ -236,12 +237,16 @@ def run_main_block(
                     side_effect=on_sleep if on_sleep is not None else list(sleep_effects),
                 ) as sleep,
             ):
-                runpy.run_path(real_mail_system_file, run_name="__main__")
+                try:
+                    runpy.run_path(real_mail_system_file, run_name="__main__")
+                except SystemExit as exc:
+                    exit_code = exc.code
         finally:
             signal.signal(signal.SIGTERM, prev_sigterm)
 
     return {
         "events": events,
+        "exit_code": exit_code,
         "disco_messages": [c.args[0] for c in disco_cls.call_args_list],
         "disco_cls": disco_cls,
         "load_dotenv": load_dotenv,

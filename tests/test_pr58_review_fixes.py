@@ -385,9 +385,9 @@ class TestDiscord:
     def test_mentions_in_mail_derived_text_are_not_parsed(self):
         session = MagicMock()
         session.post.return_value = MagicMock(ok=True)
-        mailDisco.DiscordNotifier(webhook_url="https://example.invalid/hook", session=session).send(
-            "件名: @everyone 至急"
-        )
+        mailDisco.DiscordNotifier(
+            webhook_url="https://example.invalid/hook", session=session
+        ).send("件名: @everyone 至急")
         payload = session.post.call_args.kwargs["json"]
         assert payload["allowed_mentions"] == {"parse": []}
 
@@ -453,3 +453,107 @@ class TestPermissionErrorsDoNotCrash:
         ):
             assert mailSystem.initialize_services() is True
         assert "Gmailトークンの保存に失敗しました" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# 2回目のレビュー指摘への対応
+# ---------------------------------------------------------------------------
+class TestSecondReviewFixes:
+    def test_non_json_5xx_is_retried_using_http_status(self):
+        """HTML の 503 など JSON を解析できない応答では err.code が -1 になるため HTTP ステータスで判定する。"""
+        response = MagicMock(status_code=503, text="<html>Service Unavailable</html>")
+        response.json.side_effect = ValueError("not json")
+        html_error = gspread.exceptions.APIError(response)
+        assert html_error.code == -1
+        ok = MagicMock()
+        with (
+            patch.object(
+                gspread.http_client.HTTPClient, "request", side_effect=[html_error, ok]
+            ),
+            patch.object(mailSystem.time, "sleep") as sleep,
+        ):
+            client = mailSystem.BoundedBackOffHTTPClient(
+                auth=MagicMock(), session=MagicMock()
+            )
+            assert client.request("get", "https://example.invalid/values") is ok
+        sleep.assert_called_once_with(2)
+
+    def test_br_with_attributes_and_head_are_handled(self):
+        html_body = (
+            "<html><head><title>ご利用金額のお知らせ 9,999円</title></head><body>"
+            '<p>ご利用日時：2026/11/20 12:34<br class="sp">ご利用場所：スーパーA'
+            '<BR style="line-height:1">ご利用金額：1,000円</p></body></html>'
+        )
+        payload = {"mimeType": "text/html", "body": {"data": encode_b64url(html_body)}}
+        parsed = mailSystem.parse_mail_body(mailSystem.get_email_body(payload))
+        assert parsed == {
+            "datetime": "2026/11/20 12:34",
+            "location": "スーパーA",
+            "amount": 1000,
+        }
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "2026/13/01 10:00",
+            "2026/02/30 10:00",
+            "2026/11/20 25:00",
+            "2026/11/20 10:00:61",
+        ],
+    )
+    def test_calendar_invalid_datetime_is_treated_as_na(self, raw):
+        parsed = mailSystem.parse_mail_body(
+            f"ご利用日時：{raw}\nご利用場所：店\nご利用金額：100円"
+        )
+        assert parsed["datetime"] == "N/A"
+
+    def test_sheet_failure_is_notified_only_on_first_attempt(self):
+        """Sheets 障害中に同じメールの書き込み失敗が30分ごとに通知され続けない。"""
+        gc = MagicMock()
+        gc.open_by_key.side_effect = RuntimeError("503")
+        mailSystem.gc = gc
+        sent = []
+        body = (
+            "ご利用日時：2026/11/20 12:34\nご利用場所：スーパーA\nご利用金額：1,000円"
+        )
+        with (
+            patch.object(mailSystem, "get_email_body", return_value=body),
+            patch("src.mailSystem.mailDisco.MailDisco") as disco,
+        ):
+            for _ in range(mailSystem.MAX_MESSAGE_ATTEMPTS):
+                mailSystem.gmail_service = _gmail(["w1"])
+                disco.reset_mock()
+                mailSystem.check_mail_job()
+                sent.append([c.args[0] for c in disco.call_args_list])
+
+        # 1回目: sheet() の詳細通知（利用先・金額・エラー）のみ
+        assert len(sent[0]) == 1
+        assert "スプレッドシートへの書き込みに失敗しました" in sent[0][0]
+        assert "スーパーA" in sent[0][0]
+        # 2〜5回目: 通知なし
+        assert all(msgs == [] for msgs in sent[1:-1])
+        # 6回目: 打ち切り通知のみ
+        assert len(sent[-1]) == 1
+        assert "回連続で処理に失敗" in sent[-1][0]
+        # 通知抑止フラグは処理後に元へ戻る
+        assert mailSystem._sheet_failure_notify_enabled is True
+
+    def test_failure_count_is_persisted_even_if_later_message_raises_refresh_error(
+        self, tmp_path
+    ):
+        from google.auth.exceptions import RefreshError
+
+        mailSystem.gmail_service = _gmail(
+            ["second", "first"],
+            {
+                "first": {"payload": {"headers": [], "parts": []}},  # 本文なし → 失敗
+                "second": RefreshError("token revoked"),
+            },
+        )
+        mailSystem.gc = MagicMock()
+        with patch("src.mailSystem.mailDisco.MailDisco"):
+            mailSystem.check_mail_job()
+        saved = json.loads(
+            (tmp_path / "failed_message_attempts.json").read_text(encoding="utf-8")
+        )
+        assert saved == {"first": 1}
