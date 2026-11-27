@@ -80,8 +80,17 @@ def test_save_current_run_time_not_called_when_partial_write_fails(monkeypatch):
     save_run_mock = MagicMock()
     save_ids_mock = MagicMock()
 
+    service = MagicMock()
+    service.users.return_value.messages.return_value.list.return_value.execute.return_value = {
+        "messages": [{"id": "m1"}, {"id": "m2"}]
+    }
+    payload_by_id = {"m1": p1, "m2": p2}
+    service.users.return_value.messages.return_value.get.side_effect = (
+        lambda **kwargs: types.SimpleNamespace(execute=lambda **_kw: payload_by_id[kwargs["id"]])
+    )
+
     monkeypatch.setattr(mailSystem, "gc", MagicMock())
-    monkeypatch.setattr(mailSystem, "gmail_service", _make_gmail_service(["m1", "m2"], [p1, p2]))
+    monkeypatch.setattr(mailSystem, "gmail_service", service)
     monkeypatch.setattr(mailSystem, "processed_ids", set())
     monkeypatch.setattr(mailSystem, "get_last_run_time", lambda: None)
     monkeypatch.setattr(mailSystem, "save_current_run_time", save_run_mock)
