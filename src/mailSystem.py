@@ -607,8 +607,8 @@ def check_mail_job():
     current_check_time = datetime.datetime.now()
     last_check_time = get_last_run_time()
 
-    # Gmail検索クエリに対象の件名を追加
-    query = 'in:inbox subject:"ご利用のお知らせ【三井住友カード】"'
+    # Gmail検索クエリに対象の件名を追加（アーカイブ済みも含め、ゴミ箱・迷惑メールは除外）
+    query = 'subject:"ご利用のお知らせ【三井住友カード】" -in:trash -in:spam'
     if last_check_time:
         timestamp = int(last_check_time.timestamp())
         query += f" after:{timestamp}"
@@ -617,13 +617,22 @@ def check_mail_job():
         logger.info("初回チェックまたは日時不明。対象件名の全メールを検索候補とします。")
 
     try:
-        results = (
-            gmail_service.users()
-            .messages()
-            .list(userId="me", q=query)
-            .execute(num_retries=3)
-        )
-        messages = results.get("messages", [])
+        messages = []
+        page_token = None
+        while True:
+            list_kwargs = {"userId": "me", "q": query, "maxResults": 500}
+            if page_token:
+                list_kwargs["pageToken"] = page_token
+            results = (
+                gmail_service.users()
+                .messages()
+                .list(**list_kwargs)
+                .execute(num_retries=3)
+            )
+            messages.extend(results.get("messages", []))
+            page_token = results.get("nextPageToken")
+            if not page_token:
+                break
 
         had_failure = False
 
