@@ -377,15 +377,17 @@ def sheet(email_time, location, money):
             _notify_write_success("1行目")
             return True
         
-        # 3行目(index 2)以降でA列が空の行を探すロジック
+        # 3行目(index 2)以降でA〜D列がすべて空の行を探すロジック
         for i, row in enumerate(all_values):
-            if i >= 2 and (not row or not row[0]): 
-                target_row_index = i + 1
-                break
+            if i >= 2:
+                padded_row = (list(row) + ["", "", "", ""])[:4]
+                if not any(str(cell).strip() for cell in padded_row):
+                    target_row_index = i + 1
+                    break
         
-        if target_row_index == -1: # A列が空の行で見つからなかった場合
+        if target_row_index == -1: # A〜D列が空の行が見つからなかった場合
             worksheet.append_row(data_to_log)
-            logger.info("A列が空の行が見つからなかったため、最終行にデータ '%s' が追加されました。", data_to_log)
+            logger.info("A〜D列が空の行が見つからなかったため、最終行にデータ '%s' が追加されました。", data_to_log)
             _notify_write_success("最終行")
             return True
         else:
