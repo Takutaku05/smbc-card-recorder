@@ -14,6 +14,7 @@ from src.logger_config import setup_logger
 
 import schedule
 
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials as GmailCredentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -58,6 +59,9 @@ _cached_gc = None
 _cached_spreadsheet_id = None
 _cached_spreadsheet = None
 _worksheet_cache = {}
+_gmail_creds = None
+_last_saved_token_json = None
+_refresh_error_notified = False
 
 # sheet() の戻り値: 抽出失敗(N/A)のため記録をスキップした（再試行しても結果が変わらないため処理済み扱いにする）
 SHEET_SKIPPED = "skipped"
@@ -565,6 +569,52 @@ def _write_token_atomic(token_path, content):
         raise
 
 
+def _handle_refresh_error(error):
+    """
+    Gmail トークン失効時に復旧手順を含むエラーログと通知を送信する（重複スパム抑止）。
+
+    :param error: 送出された RefreshError 例外
+    :type error: RefreshError
+    """
+    global _refresh_error_notified
+    logger.error(
+        "Gmailトークンが失効しました (%s)。config/gmailtoken.json を削除して再起動し、再認証してください。",
+        error,
+    )
+    if not _refresh_error_notified:
+        mailDisco.MailDisco(
+            "❌ Gmailの認証トークンが失効しました。\n"
+            "config/gmailtoken.json を削除してプログラムを再起動し、再認証してください。"
+        ).send()
+        _refresh_error_notified = True
+
+
+def _persist_refreshed_token_if_needed():
+    """
+    実行中に自動リフレッシュされた Gmail OAuth トークンをディスクへ保存する。
+    """
+    global _gmail_creds, _last_saved_token_json
+    if _gmail_creds is None or not hasattr(_gmail_creds, "to_json"):
+        return
+    try:
+        current_json = _gmail_creds.to_json()
+    except Exception:
+        return
+    if isinstance(current_json, str) and current_json != _last_saved_token_json:
+        try:
+            _write_token_atomic(TOKEN_FILE, current_json)
+            _last_saved_token_json = current_json
+            logger.info("更新されたGmailトークンをディスクへ保存しました。")
+        except OSError as e:
+            logger.error("更新されたGmailトークンの保存に失敗しました: %s", e)
+
+
+def _reset_refresh_error_state():
+    """正常復帰時に RefreshError 通知抑止フラグをリセットする。"""
+    global _refresh_error_notified
+    _refresh_error_notified = False
+
+
 def initialize_services():
     """
     Gmail API と Google Sheets API の認証を行い、クライアントを初期化する。
@@ -575,7 +625,7 @@ def initialize_services():
     :return: 両方のサービス初期化に成功した場合 True、失敗した場合 False
     :rtype: bool
     """
-    global gc, gmail_service, _cached_gc, _cached_spreadsheet_id, _cached_spreadsheet, _worksheet_cache
+    global gc, gmail_service, _cached_gc, _cached_spreadsheet_id, _cached_spreadsheet, _worksheet_cache, _gmail_creds, _last_saved_token_json, _refresh_error_notified
 
     logger.info("--- サービス初期化開始 ---")
     
@@ -596,6 +646,12 @@ def initialize_services():
             except Exception as e:
                 logger.error("Gmailトークンのリフレッシュに失敗: %s", e, exc_info=True)
                 logger.error("'credentials.json' を確認し、 'gmailtoken.json' を削除して再認証してください。")
+                if not _refresh_error_notified:
+                    mailDisco.MailDisco(
+                        "❌ Gmailトークンの更新に失敗しました。\n"
+                        "config/gmailtoken.json を削除してプログラムを再起動し、再認証してください。"
+                    ).send()
+                    _refresh_error_notified = True
                 return False
         else:
             try:
@@ -608,10 +664,21 @@ def initialize_services():
                 logger.error("'config/credentials.json' が見つかりません。")
                 return False
         
-        _write_token_atomic(TOKEN_FILE, gmail_creds.to_json())
+        token_json = gmail_creds.to_json()
+        _write_token_atomic(TOKEN_FILE, token_json)
+        _last_saved_token_json = token_json
 
     try:
         gmail_service = build("gmail", "v1", credentials=gmail_creds)
+        _gmail_creds = gmail_creds
+        if _last_saved_token_json is None and hasattr(gmail_creds, "to_json"):
+            try:
+                initial_json = gmail_creds.to_json()
+                if isinstance(initial_json, str):
+                    _last_saved_token_json = initial_json
+            except Exception:
+                pass
+        _refresh_error_notified = False
         logger.info("Gmail APIサービスに接続しました。")
     except HttpError as error:
         logger.error("Gmail APIサービスへの接続中にエラーが発生しました: %s", error, exc_info=True)
@@ -769,6 +836,8 @@ def check_mail_job():
                             f"⚠️ メールID {message_id} の本文を取得できなかったためスキップしました（処理済み未登録）。"
                         ).send()
                 
+                except RefreshError:
+                    raise
                 except HttpError as e_msg_get:
                     had_failure = True
                     logger.error("メールID %s の詳細取得中にエラー: %s", message_id, e_msg_get)
@@ -793,7 +862,11 @@ def check_mail_job():
             logger.warning("処理に失敗したメールがあるため、last_run_time を更新せず次回再試行します。")
         if not saved_in_loop:
             save_processed_ids()
+        _persist_refreshed_token_if_needed()
+        _reset_refresh_error_state()
 
+    except RefreshError as error:
+        _handle_refresh_error(error)
     except HttpError as error:
         logger.error("Gmail API呼び出し中にエラーが発生しました: %s", error, exc_info=True)
         mailDisco.MailDisco("❌ Gmail API呼び出し中にエラーが発生しました").send()
