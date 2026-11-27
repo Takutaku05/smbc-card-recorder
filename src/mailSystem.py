@@ -151,6 +151,8 @@ def system(mes_body):
 
     :param mes_body: 解析対象のメール本文テキスト
     :type mes_body: str
+    :return: スプレッドシートへの書き込みに成功した場合 True、失敗した場合 False
+    :rtype: bool
     """
     utilization_datetime_match = re.search(r"(?:利用日|ご利用日時)\s*[:：]\s*(\d{4}/\d{2}/\d{2} \d{2}:\d{2}(?::\d{2})?)", mes_body)
     utilization_datetime = utilization_datetime_match.group(1) if utilization_datetime_match else "N/A"
@@ -169,7 +171,7 @@ def system(mes_body):
     
     logger.info("抽出結果: 利用日=%s, 利用先=%s, 利用金額=%s", utilization_datetime, utilization_location, utilization_amount)
     
-    sheet(utilization_datetime, utilization_location, utilization_amount)
+    return sheet(utilization_datetime, utilization_location, utilization_amount)
 
 
 def sheet(email_time, location, money):
@@ -187,12 +189,14 @@ def sheet(email_time, location, money):
     :type location: str
     :param money: 利用金額（整数または抽出失敗時は文字列）
     :type money: int | str
+    :return: 書き込みに成功した場合 True、失敗した場合 False
+    :rtype: bool
     """
     global gc
 
     if gc is None:
         logger.error("GSpread認証が完了していません。データを書き込めません。")
-        return
+        return False
 
     try:
         spreadsheet = gc.open_by_key(SPREADSHEET_ID)
@@ -222,7 +226,7 @@ def sheet(email_time, location, money):
                 mailDisco.MailDisco(f"⚠️ ワークシート '{sheet_name}' が見つからず、 'Sheet1' に書き込みました。").send()
             except gspread.exceptions.WorksheetNotFound:
                 logger.error("ワークシート 'Sheet1' も見つかりません。書き込みを中止します。")
-                return
+                return False
 
         
         purpose_instance = purpose.Purpose(location)
@@ -239,13 +243,13 @@ def sheet(email_time, location, money):
             logger.warning("ワークシートの値の取得に失敗しました: %s。末尾に追加を試みます。", e_get_values)
             worksheet.append_row(data_to_log)
             logger.info("ワークシートの値取得に失敗したため、最終行にデータ '%s' が追加されました。", data_to_log)
-            return
+            return True
 
         target_row_index = -1
         if not all_values: # シートが完全に空の場合
             worksheet.append_row(data_to_log)
             logger.info("シートが空だったため、1行目にデータ '%s' が追加されました。", data_to_log)
-            return
+            return True
         
         # 3行目(index 2)以降でA列が空の行を探すロジック
         for i, row in enumerate(all_values):
@@ -256,15 +260,19 @@ def sheet(email_time, location, money):
         if target_row_index == -1: # A列が空の行で見つからなかった場合
             worksheet.append_row(data_to_log)
             logger.info("A列が空の行が見つからなかったため、最終行にデータ '%s' が追加されました。", data_to_log)
+            return True
         else:
             range_to_update = f"A{target_row_index}:D{target_row_index}"
             worksheet.update(values=[data_to_log], range_name=range_to_update)
             logger.info("%d行目 (%s) にデータ '%s' が追加されました。", target_row_index, range_to_update, data_to_log)
+            return True
 
     except gspread.exceptions.SpreadsheetNotFound:
         logger.error("スプレッドシートが見つかりません。IDが正しいか確認してください: %s", SPREADSHEET_ID)
+        return False
     except Exception as e:
         logger.error("スプレッドシートへの書き込み中に予期せぬエラーが発生しました: %s", e, exc_info=True)
+        return False
 
 def timesheet(time):
     """
@@ -413,7 +421,6 @@ def check_mail_job():
                 if message_id in processed_ids:
                     continue
                 
-                new_messages_processed_count +=1
                 logger.info("処理中のメールID: %s", message_id)
                 try:
                     msg_detail = (
@@ -434,12 +441,20 @@ def check_mail_job():
 
                     body = get_email_body(msg_detail["payload"])
                     if body:
-                        system(body)
-                        processed_ids.add(message_id)
-                        logger.info("メールID %s の処理が完了し、処理済みとしてマークしました。", message_id)
+                        if system(body):
+                            processed_ids.add(message_id)
+                            new_messages_processed_count += 1
+                            logger.info("メールID %s の処理が完了し、処理済みとしてマークしました。", message_id)
+                        else:
+                            logger.error("メールID %s のスプレッドシート書き込みに失敗したため、処理済みに登録しません。", message_id)
+                            mailDisco.MailDisco(
+                                f"❌ メールID {message_id} のスプレッドシート書き込みに失敗しました。処理済みには登録せずスキップします。"
+                            ).send()
                     else:
-                        logger.warning("メールID %s の本文が見つかりませんでした。スキップします。", message_id)
-                        processed_ids.add(message_id)
+                        logger.warning("メールID %s の本文が見つかりませんでした。処理済みに登録せずスキップします。", message_id)
+                        mailDisco.MailDisco(
+                            f"⚠️ メールID {message_id} の本文を取得できなかったためスキップしました（処理済み未登録）。"
+                        ).send()
                 
                 except HttpError as e_msg_get:
                     logger.error("メールID %s の詳細取得中にエラー: %s", message_id, e_msg_get)
