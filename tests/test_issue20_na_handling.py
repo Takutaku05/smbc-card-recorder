@@ -60,7 +60,7 @@ def _setup_sheet_mocks(monkeypatch):
 def test_all_three_fields_missing_sends_single_consolidated_notification_and_skips_write(monkeypatch):
     worksheet, sent = _setup_sheet_mocks(monkeypatch)
 
-    assert mailSystem.sheet("N/A", "N/A", "N/A") is False
+    assert mailSystem.sheet("N/A", "N/A", "N/A") == mailSystem.SHEET_SKIPPED
     worksheet.update.assert_not_called()
     worksheet.append_row.assert_not_called()
     assert len(sent) == 1
@@ -72,7 +72,7 @@ def test_all_three_fields_missing_sends_single_consolidated_notification_and_ski
 def test_two_fields_missing_notifies_both_and_skips_write(monkeypatch):
     worksheet, sent = _setup_sheet_mocks(monkeypatch)
 
-    assert mailSystem.sheet("2026/01/05 12:00", "N/A", "N/A") is False
+    assert mailSystem.sheet("2026/01/05 12:00", "N/A", "N/A") == mailSystem.SHEET_SKIPPED
     worksheet.update.assert_not_called()
     worksheet.append_row.assert_not_called()
     assert len(sent) == 1
@@ -85,7 +85,7 @@ def test_two_fields_missing_notifies_both_and_skips_write(monkeypatch):
 def test_non_int_money_string_is_rejected_without_writing(monkeypatch):
     worksheet, sent = _setup_sheet_mocks(monkeypatch)
 
-    assert mailSystem.sheet("2026/01/05 12:00", "テスト店", "不正文字列") is False
+    assert mailSystem.sheet("2026/01/05 12:00", "テスト店", "不正文字列") == mailSystem.SHEET_SKIPPED
     worksheet.update.assert_not_called()
     worksheet.append_row.assert_not_called()
     assert len(sent) == 1
@@ -99,3 +99,35 @@ def test_complete_fields_write_normally(monkeypatch):
     worksheet.update.assert_called_once()
     assert len(sent) == 1
     assert "【正常に書き込みました】" in sent[0]
+
+
+def test_check_mail_job_marks_skipped_message_processed(monkeypatch):
+    """抽出失敗(SHEET_SKIPPED)は処理済みにし、last_run_time も進めて永久リトライを防ぐ。"""
+    from unittest.mock import MagicMock
+
+    service = MagicMock()
+    service.users.return_value.messages.return_value.list.return_value.execute.return_value = {
+        "messages": [{"id": "m1"}]
+    }
+    service.users.return_value.messages.return_value.get.return_value.execute.return_value = {
+        "payload": {"headers": [{"name": "Subject", "value": "test"}]}
+    }
+    save_run_mock = MagicMock()
+
+    monkeypatch.setattr(mailSystem, "gc", MagicMock())
+    monkeypatch.setattr(mailSystem, "gmail_service", service)
+    monkeypatch.setattr(mailSystem, "processed_ids", set())
+    monkeypatch.setattr(mailSystem, "get_last_run_time", lambda: None)
+    monkeypatch.setattr(mailSystem, "save_current_run_time", save_run_mock)
+    monkeypatch.setattr(mailSystem, "save_processed_ids", MagicMock())
+    monkeypatch.setattr(mailSystem, "get_email_body", lambda _p: "body")
+    monkeypatch.setattr(mailSystem, "system", lambda _b: mailSystem.SHEET_SKIPPED)
+    disco_mock = MagicMock()
+    monkeypatch.setattr(mailSystem.mailDisco, "MailDisco", disco_mock)
+
+    mailSystem.check_mail_job()
+
+    assert "m1" in mailSystem.processed_ids
+    save_run_mock.assert_called_once()
+    # 書き込み失敗(❌)通知は送らない（欠損通知は sheet() 側で送信済み）
+    assert not any("書き込みに失敗" in str(c.args[0]) for c in disco_mock.call_args_list)

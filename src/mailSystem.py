@@ -59,6 +59,9 @@ _cached_spreadsheet_id = None
 _cached_spreadsheet = None
 _worksheet_cache = {}
 
+# sheet() の戻り値: 抽出失敗(N/A)のため記録をスキップした（再試行しても結果が変わらないため処理済み扱いにする）
+SHEET_SKIPPED = "skipped"
+
 
 def _extract_charset(part):
     """
@@ -309,8 +312,8 @@ def system(mes_body):
 
     :param mes_body: 解析対象のメール本文テキスト
     :type mes_body: str
-    :return: スプレッドシートへの書き込みに成功した場合 True、失敗した場合 False
-    :rtype: bool
+    :return: 書き込み成功時 True、失敗時 False、抽出失敗でスキップした場合 ``SHEET_SKIPPED``
+    :rtype: bool | str
     """
     utilization_datetime_match = re.search(
         r"(?:利用日|ご利用日時)\s*[:：]?\s*(\d{4}[/-]\d{1,2}[/-]\d{1,2}[\s　]+\d{1,2}:\d{2}(?::\d{2})?)",
@@ -358,8 +361,8 @@ def sheet(email_time, location, money):
     :type location: str
     :param money: 利用金額（整数または抽出失敗時は文字列）
     :type money: int | str
-    :return: 書き込みに成功した場合 True、失敗した場合 False
-    :rtype: bool
+    :return: 書き込み成功時 True、失敗時 False、抽出失敗(N/A)でスキップした場合 ``SHEET_SKIPPED``
+    :rtype: bool | str
     """
     global gc, _cached_gc, _cached_spreadsheet_id, _cached_spreadsheet, _worksheet_cache
 
@@ -401,7 +404,8 @@ def sheet(email_time, location, money):
                 f"⚠️ 以下の項目を抽出できなかったため記録を中止しました: {missing_str}\n"
                 f"利用日: {email_time} / 利用先: {location} / 金額: {money}"
             ).send()
-            return False
+            # 同じ本文を再試行しても抽出結果は変わらないため、失敗(False)ではなくスキップとして返す
+            return SHEET_SKIPPED
 
         is_complete_data = True
         sheet_name = timesheet(email_time)
@@ -739,7 +743,14 @@ def check_mail_job():
 
                     body = get_email_body(msg_detail["payload"])
                     if body:
-                        if system(body):
+                        result = system(body)
+                        if result == SHEET_SKIPPED:
+                            # 抽出失敗は再試行しても解消しないため処理済みにし、永久リトライを防ぐ（通知は sheet() 内で送信済み）
+                            processed_ids.add(message_id)
+                            save_processed_ids()
+                            saved_in_loop = True
+                            logger.warning("メールID %s は抽出失敗のため記録をスキップし、処理済みとしてマークしました。", message_id)
+                        elif result:
                             processed_ids.add(message_id)
                             save_processed_ids()
                             saved_in_loop = True
