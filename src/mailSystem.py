@@ -36,6 +36,8 @@ PROCESSED_IDS_FILE = os.path.join(BASE_DIR, "config", "processed_message_ids.jso
 PROCESSED_IDS_MAX_ENTRIES = 2000
 PROCESSED_IDS_RETENTION_DAYS = 90
 _processed_id_timestamps = {}
+
+
 def _resolve_config_path(file_path):
     """
     設定ファイルパスが相対パスの場合、プロジェクトルート (BASE_DIR) 基準に解決する。
@@ -51,7 +53,7 @@ def _resolve_config_path(file_path):
 
 
 SERVICE_ACCOUNT_FILE = _resolve_config_path(os.getenv("SERVICE_ACCOUNT_FILE"))
-SCOPES_SHEET = ['https://www.googleapis.com/auth/spreadsheets']
+SCOPES_SHEET = ["https://www.googleapis.com/auth/spreadsheets"]
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 
 # --- グローバル変数 ---
@@ -81,7 +83,9 @@ def _extract_charset(part):
     """
     for header in part.get("headers", []):
         if header.get("name", "").lower() == "content-type":
-            match = re.search(r'charset\s*=\s*"?([^";\s]+)"?', header.get("value", ""), re.IGNORECASE)
+            match = re.search(
+                r'charset\s*=\s*"?([^";\s]+)"?', header.get("value", ""), re.IGNORECASE
+            )
             if match:
                 return match.group(1).strip().lower()
     return None
@@ -102,7 +106,7 @@ def decode_base64_url_safe(data, charset=None):
     :rtype: str
     :raises UnicodeDecodeError: すべての候補文字コードでデコードに失敗した場合
     """
-    decoded_bytes = base64.urlsafe_b64decode(data + '=' * ((-len(data)) % 4))
+    decoded_bytes = base64.urlsafe_b64decode(data + "=" * ((-len(data)) % 4))
 
     candidates = []
     if charset:
@@ -137,8 +141,12 @@ def _html_to_text(html_body):
     :return: プレーンテキスト化された文字列
     :rtype: str
     """
-    text = re.sub(r"<style\b[^>]*>.*?</style>", "", html_body, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r"<script\b[^>]*>.*?</script>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(
+        r"<style\b[^>]*>.*?</style>", "", html_body, flags=re.IGNORECASE | re.DOTALL
+    )
+    text = re.sub(
+        r"<script\b[^>]*>.*?</script>", "", text, flags=re.IGNORECASE | re.DOTALL
+    )
     text = re.sub(r"<br\s*/?>|</tr>|</p>|</div>|</li>", "\n", text, flags=re.IGNORECASE)
     text = re.sub(r"</t[dh]>", " ", text, flags=re.IGNORECASE)
     text = re.sub(r"<[^>]+>", "", text)
@@ -217,8 +225,12 @@ def get_email_body(msg_payload):
     if html_body:
         return _html_to_text(html_body)
 
-    logger.warning("本文パートを抽出できませんでした。MIME構造: %s", _summarize_mime_tree(msg_payload))
+    logger.warning(
+        "本文パートを抽出できませんでした。MIME構造: %s",
+        _summarize_mime_tree(msg_payload),
+    )
     return ""
+
 
 def _atomic_write_json(path, obj):
     """
@@ -259,16 +271,21 @@ def get_last_run_time():
             with open(LAST_RUN_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if not isinstance(data, dict):
-                    raise TypeError("last_run_time.json のルート要素はオブジェクトである必要があります。")
+                    raise TypeError(
+                        "last_run_time.json のルート要素はオブジェクトである必要があります。"
+                    )
                 dt = datetime.datetime.fromisoformat(data.get("last_run_time"))
                 return dt.astimezone(datetime.timezone.utc)
         except (json.JSONDecodeError, TypeError, ValueError, OSError) as e:
-            logger.warning("前回の実行日時ファイルが不正です (%s)。新しく作成します。", e)
+            logger.warning(
+                "前回の実行日時ファイルが不正です (%s)。新しく作成します。", e
+            )
             mailDisco.MailDisco(
                 "⚠️ 前回の実行日時ファイルが破損または読み込み不能のためリセットしました。"
             ).send()
             return None
     return None
+
 
 def save_current_run_time(current_time):
     """
@@ -282,6 +299,7 @@ def save_current_run_time(current_time):
         _atomic_write_json(LAST_RUN_FILE, {"last_run_time": aware_utc.isoformat()})
     except OSError as e:
         logger.error("前回実行日時の保存中にエラーが発生しました: %s", e)
+
 
 def load_processed_ids():
     """
@@ -308,14 +326,21 @@ def load_processed_ids():
             processed_ids = set(pruned.keys())
             logger.info("処理済みメールIDを %d 件ロードしました。", len(processed_ids))
         except (json.JSONDecodeError, TypeError, OSError) as e:
-            logger.warning("処理済みメールIDファイル '%s' が不正です。新しく作成します。エラー: %s", PROCESSED_IDS_FILE, e)
+            logger.warning(
+                "処理済みメールIDファイル '%s' が不正です。新しく作成します。エラー: %s",
+                PROCESSED_IDS_FILE,
+                e,
+            )
             mailDisco.MailDisco(
                 "⚠️ 処理済みメールIDファイルが破損または読み込み不能のため初期化しました。重複記録に注意してください。"
             ).send()
             processed_ids = set()
             _processed_id_timestamps = {}
     else:
-        logger.info("処理済みメールIDファイル '%s' が見つかりません。新しく作成します。", PROCESSED_IDS_FILE)
+        logger.info(
+            "処理済みメールIDファイル '%s' が見つかりません。新しく作成します。",
+            PROCESSED_IDS_FILE,
+        )
         processed_ids = set()
         _processed_id_timestamps = {}
 
@@ -338,7 +363,9 @@ def _prune_processed_timestamps(ts_map, now=None):
     kept = []
     for mid, ts_str in ts_map.items():
         try:
-            parsed_dt = datetime.datetime.fromisoformat(ts_str).astimezone(datetime.timezone.utc)
+            parsed_dt = datetime.datetime.fromisoformat(ts_str).astimezone(
+                datetime.timezone.utc
+            )
         except (ValueError, TypeError):
             parsed_dt = now
             ts_str = now.isoformat()
@@ -359,8 +386,7 @@ def save_processed_ids():
         now = datetime.datetime.now(datetime.timezone.utc)
         now_iso = now.isoformat()
         merged = {
-            mid: _processed_id_timestamps.get(mid, now_iso)
-            for mid in processed_ids
+            mid: _processed_id_timestamps.get(mid, now_iso) for mid in processed_ids
         }
         pruned = _prune_processed_timestamps(merged, now=now)
         _processed_id_timestamps = pruned
@@ -475,7 +501,9 @@ def sheet(email_time, location, money):
                 actual_sheet_name = "Sheet1"
                 used_fallback_sheet = True
             except gspread.exceptions.WorksheetNotFound:
-                logger.error("ワークシート 'Sheet1' も見つかりません。書き込みを中止します。")
+                logger.error(
+                    "ワークシート 'Sheet1' も見つかりません。書き込みを中止します。"
+                )
                 mailDisco.MailDisco(
                     f"❌ ワークシート '{sheet_name}' も 'Sheet1' も見つからず、利用先: {location} / 金額: {money} を記録できませんでした。"
                 ).send()
@@ -501,31 +529,48 @@ def sheet(email_time, location, money):
         try:
             all_values = worksheet.get_all_values()
         except Exception as e_get_values:
-            logger.warning("ワークシートの値の取得に失敗しました: %s。末尾に追加を試みます。", e_get_values)
+            logger.warning(
+                "ワークシートの値の取得に失敗しました: %s。末尾に追加を試みます。",
+                e_get_values,
+            )
             worksheet.append_row(data_to_log)
-            logger.info("ワークシートの値取得に失敗したため、最終行にデータ '%s' が追加されました。", data_to_log)
+            logger.info(
+                "ワークシートの値取得に失敗したため、最終行にデータ '%s' が追加されました。",
+                data_to_log,
+            )
             _notify_write_success("最終行")
             return True
 
         target_row_index = -1
-        if not all_values: # シートが完全に空の場合
+        if not all_values:  # シートが完全に空の場合
             worksheet.append_row(data_to_log)
-            logger.info("シートが空だったため、1行目にデータ '%s' が追加されました。", data_to_log)
+            logger.info(
+                "シートが空だったため、1行目にデータ '%s' が追加されました。",
+                data_to_log,
+            )
             _notify_write_success("1行目")
             return True
-        
+
         # 3行目(index 2)以降でA〜D列がすべて空の行を探すロジック
         target_row_index = find_target_row(all_values)
-        
-        if target_row_index is None: # A〜D列が空の行が見つからなかった場合
+
+        if target_row_index is None:  # A〜D列が空の行が見つからなかった場合
             worksheet.append_row(data_to_log)
-            logger.info("A〜D列が空の行が見つからなかったため、最終行にデータ '%s' が追加されました。", data_to_log)
+            logger.info(
+                "A〜D列が空の行が見つからなかったため、最終行にデータ '%s' が追加されました。",
+                data_to_log,
+            )
             _notify_write_success("最終行")
             return True
         else:
             range_to_update = f"A{target_row_index}:D{target_row_index}"
             worksheet.update(values=[data_to_log], range_name=range_to_update)
-            logger.info("%d行目 (%s) にデータ '%s' が追加されました。", target_row_index, range_to_update, data_to_log)
+            logger.info(
+                "%d行目 (%s) にデータ '%s' が追加されました。",
+                target_row_index,
+                range_to_update,
+                data_to_log,
+            )
             _notify_write_success(f"{target_row_index}行目")
             return True
 
@@ -533,7 +578,10 @@ def sheet(email_time, location, money):
         # キャッシュが古い可能性があるため破棄し、次回は再取得する
         _cached_spreadsheet = None
         _worksheet_cache = {}
-        logger.error("スプレッドシートが見つかりません。IDが正しいか確認してください: %s", SPREADSHEET_ID)
+        logger.error(
+            "スプレッドシートが見つかりません。IDが正しいか確認してください: %s",
+            SPREADSHEET_ID,
+        )
         mailDisco.MailDisco(
             f"❌ スプレッドシートが見つからず、利用先: {location} / 金額: {money} を記録できませんでした。SPREADSHEET_IDを確認してください。"
         ).send()
@@ -542,11 +590,16 @@ def sheet(email_time, location, money):
         # シート削除・リネーム等でキャッシュが無効になっている可能性があるため破棄し、次回は再取得する
         _cached_spreadsheet = None
         _worksheet_cache = {}
-        logger.error("スプレッドシートへの書き込み中に予期せぬエラーが発生しました: %s", e, exc_info=True)
+        logger.error(
+            "スプレッドシートへの書き込み中に予期せぬエラーが発生しました: %s",
+            e,
+            exc_info=True,
+        )
         mailDisco.MailDisco(
             f"❌ スプレッドシートへの書き込みに失敗しました。\n利用先: {location} / 金額: {money}\nエラー: {e}"
         ).send()
         return False
+
 
 def timesheet(time):
     """
@@ -563,17 +616,20 @@ def timesheet(time):
     time_object = None
     try:
         # まず HH:MM:SS 形式 (デビットカード用など) で試す
-        time_object = datetime.datetime.strptime(normalized_time, '%Y/%m/%d %H:%M:%S')
+        time_object = datetime.datetime.strptime(normalized_time, "%Y/%m/%d %H:%M:%S")
     except ValueError:
         try:
             # 次に HH:MM 形式 (クレジットカード用など) で試す
-            time_object = datetime.datetime.strptime(normalized_time, '%Y/%m/%d %H:%M')
+            time_object = datetime.datetime.strptime(normalized_time, "%Y/%m/%d %H:%M")
         except ValueError:
             # どちらも失敗した場合
-            logger.warning("timesheet関数: 日付 '%s' の形式が不正です。デフォルトの月を使用します。", time)
-            return f'{datetime.datetime.now().month}月'
-    
-    return f'{time_object.month}月'
+            logger.warning(
+                "timesheet関数: 日付 '%s' の形式が不正です。デフォルトの月を使用します。",
+                time,
+            )
+            return f"{datetime.datetime.now().month}月"
+
+    return f"{time_object.month}月"
 
 
 def parse_mail_body(mes_body):
@@ -599,7 +655,11 @@ def parse_mail_body(mes_body):
         r"(?:利用先|ご利用場所)[ \t\u3000]*[:：][ \t\u3000]*([^\r\n]*)",
         mes_body,
     )
-    raw_location = utilization_location_match.group(1).strip() if utilization_location_match else ""
+    raw_location = (
+        utilization_location_match.group(1).strip()
+        if utilization_location_match
+        else ""
+    )
     utilization_location = raw_location if raw_location else "N/A"
 
     utilization_amount_match = re.search(
@@ -608,14 +668,21 @@ def parse_mail_body(mes_body):
     )
     utilization_amount = "N/A"
     if utilization_amount_match:
-        sign_str, digits_str = utilization_amount_match.group(1), utilization_amount_match.group(2)
+        sign_str, digits_str = (
+            utilization_amount_match.group(1),
+            utilization_amount_match.group(2),
+        )
         if re.fullmatch(r"\d{1,3}(?:,\d{3})*|\d+", digits_str):
             parsed_amount = int(digits_str.replace(",", ""))
             if sign_str in ("-", "−", "－", "▲", "△"):
                 parsed_amount = -parsed_amount
             utilization_amount = parsed_amount
         else:
-            logger.warning("金額 '%s%s' の書式が不正なため N/A として扱います。", sign_str, digits_str)
+            logger.warning(
+                "金額 '%s%s' の書式が不正なため N/A として扱います。",
+                sign_str,
+                digits_str,
+            )
 
     return {
         "datetime": utilization_datetime,
@@ -729,19 +796,34 @@ def initialize_services():
     :return: 両方のサービス初期化に成功した場合 True、失敗した場合 False
     :rtype: bool
     """
-    global gc, gmail_service, _cached_gc, _cached_spreadsheet_id, _cached_spreadsheet, _worksheet_cache, _gmail_creds, _last_saved_token_json, _refresh_error_notified
+    global \
+        gc, \
+        gmail_service, \
+        _cached_gc, \
+        _cached_spreadsheet_id, \
+        _cached_spreadsheet, \
+        _worksheet_cache, \
+        _gmail_creds, \
+        _last_saved_token_json, \
+        _refresh_error_notified
 
     logger.info("--- サービス初期化開始 ---")
-    
+
     # Gmail認証
     gmail_creds = None
     if os.path.exists(TOKEN_FILE):
         try:
-            gmail_creds = GmailCredentials.from_authorized_user_file(TOKEN_FILE, [SCOPES_GMAIL])
+            gmail_creds = GmailCredentials.from_authorized_user_file(
+                TOKEN_FILE, [SCOPES_GMAIL]
+            )
         except (ValueError, OSError) as e:
-            logger.warning("保存済みGmailトークン '%s' の読み込みに失敗したため再認証を行います: %s", TOKEN_FILE, e)
+            logger.warning(
+                "保存済みGmailトークン '%s' の読み込みに失敗したため再認証を行います: %s",
+                TOKEN_FILE,
+                e,
+            )
             gmail_creds = None
-    
+
     if not gmail_creds or not gmail_creds.valid:
         if gmail_creds and gmail_creds.expired and gmail_creds.refresh_token:
             try:
@@ -749,7 +831,9 @@ def initialize_services():
                 logger.info("Gmailトークンをリフレッシュしました。")
             except Exception as e:
                 logger.error("Gmailトークンのリフレッシュに失敗: %s", e, exc_info=True)
-                logger.error("'credentials.json' を確認し、 'gmailtoken.json' を削除して再認証してください。")
+                logger.error(
+                    "'credentials.json' を確認し、 'gmailtoken.json' を削除して再認証してください。"
+                )
                 if not _refresh_error_notified:
                     mailDisco.MailDisco(
                         "❌ Gmailトークンの更新に失敗しました。\n"
@@ -759,7 +843,11 @@ def initialize_services():
                 return False
         else:
             try:
-                credentials_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config", "credentials.json")
+                credentials_path = os.path.join(
+                    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                    "config",
+                    "credentials.json",
+                )
                 flow = InstalledAppFlow.from_client_secrets_file(
                     credentials_path, [SCOPES_GMAIL]
                 )
@@ -767,7 +855,7 @@ def initialize_services():
             except FileNotFoundError:
                 logger.error("'config/credentials.json' が見つかりません。")
                 return False
-        
+
         token_json = gmail_creds.to_json()
         _write_token_atomic(TOKEN_FILE, token_json)
         _last_saved_token_json = token_json
@@ -785,19 +873,29 @@ def initialize_services():
         _refresh_error_notified = False
         logger.info("Gmail APIサービスに接続しました。")
     except HttpError as error:
-        logger.error("Gmail APIサービスへの接続中にエラーが発生しました: %s", error, exc_info=True)
-        return False # 初期化失敗
+        logger.error(
+            "Gmail APIサービスへの接続中にエラーが発生しました: %s",
+            error,
+            exc_info=True,
+        )
+        return False  # 初期化失敗
 
     # GSpread認証と必須設定の検証
     try:
         if not SERVICE_ACCOUNT_FILE:
-            logger.error("環境変数 'SERVICE_ACCOUNT_FILE' が設定されていません。 .envファイルを確認してください。")
+            logger.error(
+                "環境変数 'SERVICE_ACCOUNT_FILE' が設定されていません。 .envファイルを確認してください。"
+            )
             return False
         if not SPREADSHEET_ID:
-            logger.error("環境変数 'SPREADSHEET_ID' が設定されていません。 .envファイルを確認してください。")
+            logger.error(
+                "環境変数 'SPREADSHEET_ID' が設定されていません。 .envファイルを確認してください。"
+            )
             return False
         if not os.getenv("DISCORD_WEBHOOK_URL"):
-            logger.warning("環境変数 'DISCORD_WEBHOOK_URL' が設定されていません。Discord通知は無効の状態で稼働します。")
+            logger.warning(
+                "環境変数 'DISCORD_WEBHOOK_URL' が設定されていません。Discord通知は無効の状態で稼働します。"
+            )
 
         sa_kwargs = {"filename": SERVICE_ACCOUNT_FILE, "scopes": SCOPES_SHEET}
         backoff_client = getattr(gspread, "BackOffHTTPClient", None)
@@ -811,21 +909,29 @@ def initialize_services():
         _worksheet_cache = {}
         logger.info("Google スプレッドシートAPIに接続しました。")
     except FileNotFoundError:
-        logger.error("サービスアカウントファイル '%s' が見つかりません。 (.envファイルを確認してください)", SERVICE_ACCOUNT_FILE)
+        logger.error(
+            "サービスアカウントファイル '%s' が見つかりません。 (.envファイルを確認してください)",
+            SERVICE_ACCOUNT_FILE,
+        )
         return False
     except gspread.exceptions.SpreadsheetNotFound:
-        logger.error("スプレッドシートが見つかりません。SPREADSHEET_ID が正しいか確認してください。")
+        logger.error(
+            "スプレッドシートが見つかりません。SPREADSHEET_ID が正しいか確認してください。"
+        )
         mailDisco.MailDisco(
             "❌ 起動エラー: スプレッドシートが見つかりません。SPREADSHEET_ID と共有設定を確認してください。"
         ).send()
         return False
     except Exception as e:
         logger.error("Google スプレッドシートAPIの認証エラー: %s", e, exc_info=True)
-        logger.error("サービスアカウントのメールアドレスをスプレッドシートに共有（編集者権限）したか確認してください。")
-        return False # 初期化失敗
-    
+        logger.error(
+            "サービスアカウントのメールアドレスをスプレッドシートに共有（編集者権限）したか確認してください。"
+        )
+        return False  # 初期化失敗
+
     logger.info("--- サービス初期化完了 ---")
-    return True # 初期化成功
+    return True  # 初期化成功
+
 
 def check_mail_job():
     """
@@ -847,19 +953,30 @@ def check_mail_job():
 
     saved_in_loop = False
 
-    logger.info("--- %s: 定時メールチェック実行 ---", datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-    
+    logger.info(
+        "--- %s: 定時メールチェック実行 ---",
+        datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    )
+
     current_check_time = datetime.datetime.now(datetime.timezone.utc)
     last_check_time = get_last_run_time()
 
     # Gmail検索クエリに対象の件名を追加（アーカイブ済みも含め、ゴミ箱・迷惑メールは除外）
     query = 'subject:"ご利用のお知らせ【三井住友カード】" -in:trash -in:spam'
     if last_check_time:
-        query_timestamp = max(0, int(last_check_time.timestamp()) - LAST_RUN_OVERLAP_SECONDS)
+        query_timestamp = max(
+            0, int(last_check_time.timestamp()) - LAST_RUN_OVERLAP_SECONDS
+        )
         query += f" after:{query_timestamp}"
-        logger.info("最終チェック日時 (%s) 以降を検索 (after:%d)。", last_check_time.isoformat(), query_timestamp)
+        logger.info(
+            "最終チェック日時 (%s) 以降を検索 (after:%d)。",
+            last_check_time.isoformat(),
+            query_timestamp,
+        )
     else:
-        logger.info("初回チェックまたは日時不明。対象件名の全メールを検索候補とします。")
+        logger.info(
+            "初回チェックまたは日時不明。対象件名の全メールを検索候補とします。"
+        )
 
     try:
         messages = []
@@ -885,15 +1002,17 @@ def check_mail_job():
             logger.info("新しい対象メールは見つかりませんでした。")
         else:
             new_messages_processed_count = 0
-            logger.info("%d 件の候補メールが見つかりました。処理を開始します。", len(messages))
+            logger.info(
+                "%d 件の候補メールが見つかりました。処理を開始します。", len(messages)
+            )
 
             # Gmail API は新着順(降順)で返すため、古い順(昇順)に処理してスプレッドシートの時系列を保つ
             for message_info in reversed(messages):
                 message_id = message_info["id"]
-                
+
                 if message_id in processed_ids:
                     continue
-                
+
                 logger.info("処理中のメールID: %s", message_id)
                 try:
                     msg_detail = (
@@ -902,14 +1021,14 @@ def check_mail_job():
                         .get(userId="me", id=message_id, format="full")
                         .execute(num_retries=3)
                     )
-                    
+
                     headers = msg_detail["payload"]["headers"]
                     subject = "件名なし"
                     for header in headers:
                         if header["name"].lower() == "subject":
                             subject = header["value"]
                             break
-                    
+
                     logger.info("件名: %s", subject)
 
                     body = get_email_body(msg_detail["payload"])
@@ -920,50 +1039,74 @@ def check_mail_job():
                             processed_ids.add(message_id)
                             save_processed_ids()
                             saved_in_loop = True
-                            logger.warning("メールID %s は抽出失敗のため記録をスキップし、処理済みとしてマークしました。", message_id)
+                            logger.warning(
+                                "メールID %s は抽出失敗のため記録をスキップし、処理済みとしてマークしました。",
+                                message_id,
+                            )
                         elif result:
                             processed_ids.add(message_id)
                             save_processed_ids()
                             saved_in_loop = True
                             new_messages_processed_count += 1
-                            logger.info("メールID %s の処理が完了し、処理済みとしてマークしました。", message_id)
+                            logger.info(
+                                "メールID %s の処理が完了し、処理済みとしてマークしました。",
+                                message_id,
+                            )
                         else:
                             had_failure = True
-                            logger.error("メールID %s のスプレッドシート書き込みに失敗したため、処理済みに登録しません。", message_id)
+                            logger.error(
+                                "メールID %s のスプレッドシート書き込みに失敗したため、処理済みに登録しません。",
+                                message_id,
+                            )
                             mailDisco.MailDisco(
                                 f"❌ メールID {message_id} のスプレッドシート書き込みに失敗しました。処理済みには登録せずスキップします。"
                             ).send()
                     else:
                         had_failure = True
-                        logger.warning("メールID %s の本文が見つかりませんでした。処理済みに登録せずスキップします。", message_id)
+                        logger.warning(
+                            "メールID %s の本文が見つかりませんでした。処理済みに登録せずスキップします。",
+                            message_id,
+                        )
                         mailDisco.MailDisco(
                             f"⚠️ メールID {message_id} の本文を取得できなかったためスキップしました（処理済み未登録）。"
                         ).send()
-                
+
                 except RefreshError:
                     raise
                 except HttpError as e_msg_get:
                     had_failure = True
-                    logger.error("メールID %s の詳細取得中にエラー: %s", message_id, e_msg_get)
+                    logger.error(
+                        "メールID %s の詳細取得中にエラー: %s", message_id, e_msg_get
+                    )
                     mailDisco.MailDisco(
                         f"❌ メールID {message_id} の取得中にエラーが発生しました。次回再試行するため最終チェック時刻を更新しません。"
                     ).send()
                 except Exception as e_proc:
                     had_failure = True
-                    logger.error("メールID %s の処理中に予期せぬエラー: %s", message_id, e_proc, exc_info=True)
+                    logger.error(
+                        "メールID %s の処理中に予期せぬエラー: %s",
+                        message_id,
+                        e_proc,
+                        exc_info=True,
+                    )
                     mailDisco.MailDisco(
                         f"❌ メールID {message_id} の処理中に予期せぬエラーが発生しました。次回再試行するため最終チェック時刻を更新しません。"
                     ).send()
 
             if new_messages_processed_count > 0:
-                 logger.info("%d 件の新しいメールの処理が完了しました。", new_messages_processed_count)
+                logger.info(
+                    "%d 件の新しいメールの処理が完了しました。",
+                    new_messages_processed_count,
+                )
             else:
-                 logger.info("新しい未処理メールはありませんでした（処理済みを除く）。")
-        
+                logger.info("新しい未処理メールはありませんでした（処理済みを除く）。")
+
         if not had_failure:
             save_current_run_time(current_check_time)
         else:
-            logger.warning("処理に失敗したメールがあるため、last_run_time を更新せず次回再試行します。")
+            logger.warning(
+                "処理に失敗したメールがあるため、last_run_time を更新せず次回再試行します。"
+            )
         if not saved_in_loop:
             save_processed_ids()
         _persist_refreshed_token_if_needed()
@@ -972,15 +1115,18 @@ def check_mail_job():
     except RefreshError as error:
         _handle_refresh_error(error)
     except HttpError as error:
-        logger.error("Gmail API呼び出し中にエラーが発生しました: %s", error, exc_info=True)
+        logger.error(
+            "Gmail API呼び出し中にエラーが発生しました: %s", error, exc_info=True
+        )
         mailDisco.MailDisco("❌ Gmail API呼び出し中にエラーが発生しました").send()
     except Exception as e:
         logger.error("ジョブ実行で予期せぬエラーが発生しました: %s", e, exc_info=True)
         mailDisco.MailDisco("ジョブ実行で予期せぬエラーが発生しました").send()
 
-    logger.info("--- %s: メールチェック完了 ---", datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-
-
+    logger.info(
+        "--- %s: メールチェック完了 ---",
+        datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    )
 
 
 # --- メインの実行ブロック ---
@@ -995,9 +1141,9 @@ def _handle_sigterm(_signum, _frame):
 if __name__ == "__main__":
     signal.signal(signal.SIGTERM, _handle_sigterm)
 
-    load_processed_ids() # 最初に処理済みIDをロード
+    load_processed_ids()  # 最初に処理済みIDをロード
 
-    if initialize_services(): # サービス初期化
+    if initialize_services():  # サービス初期化
         logger.info("サービス初期化完了。スケジューラーを開始します。")
         mailDisco.MailDisco("--- メール監視システムを起動しました ---").send()
 
@@ -1006,7 +1152,9 @@ if __name__ == "__main__":
         schedule.every().hour.at(":30").do(check_mail_job)
 
         logger.info("スケジューラーを実行中です。")
-        logger.info("次回の実行は %s です。", schedule.next_run().strftime('%Y-%m-%d %H:%M:%S'))
+        logger.info(
+            "次回の実行は %s です。", schedule.next_run().strftime("%Y-%m-%d %H:%M:%S")
+        )
 
         try:
             # 起動時にすぐ実行したい場合は、以下のコメントを解除
@@ -1026,4 +1174,6 @@ if __name__ == "__main__":
 
     else:
         logger.error("サービスの初期化に失敗したため、プログラムを終了します。")
-        mailDisco.MailDisco("❌ サービスの初期化に失敗しました。プログラムを終了します。").send()
+        mailDisco.MailDisco(
+            "❌ サービスの初期化に失敗しました。プログラムを終了します。"
+        ).send()
