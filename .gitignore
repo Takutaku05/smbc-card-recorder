@@ -208,7 +208,6 @@ __marimo__/
 
 
 # add
-.env
 config.py
 logs/
 

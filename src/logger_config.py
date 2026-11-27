@@ -13,6 +13,7 @@ def _init_root_logger():
         return logger
 
     logger.setLevel(logging.DEBUG)
+    logger.propagate = False  # ルートロガーへ伝播させず二重出力を防ぐ
 
     formatter = logging.Formatter(
         fmt="%(asctime)s [%(levelname)s] [%(name)s] %(message)s",

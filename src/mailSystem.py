@@ -156,7 +156,7 @@ def system(mes_body):
     utilization_datetime = utilization_datetime_match.group(1) if utilization_datetime_match else "N/A"
     utilization_location_match = re.search(r"(?:利用先|ご利用場所)\s*[:：]\s*([^\n]+)", mes_body)
     utilization_location = utilization_location_match.group(1).strip() if utilization_location_match else "N/A"
-    utilization_amount_match = re.search(r"ご?利用金額\s*[:：]?\s*([-?\d,]+)円", mes_body)
+    utilization_amount_match = re.search(r"ご?利用金額\s*[:：]?\s*([-\d,]+)円", mes_body)
     utilization_amount_str = utilization_amount_match.group(1) if utilization_amount_match else "N/A"
     utilization_amount = "N/A"
     if utilization_amount_str != "N/A":
