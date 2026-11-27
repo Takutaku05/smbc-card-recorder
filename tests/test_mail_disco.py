@@ -24,7 +24,7 @@ class TestMailDisco:
         assert result is True
         mock_post.assert_called_once_with(
             "https://discord.com/api/webhooks/test/token",
-            json={"content": "【正常に書き込みました】\n利用先: テスト店"},
+            json={"content": "【正常に書き込みました】\n利用先: テスト店", "allowed_mentions": {"parse": []}},
             timeout=5,
         )
 
@@ -87,8 +87,8 @@ class TestMailDisco:
             assert MailDisco("⚠️ 絵文字 & 記号 <> \"' \n改行").send() is True
 
         assert mock_post.call_count == 2
-        assert mock_post.call_args_list[0].kwargs["json"] == {"content": ""}
-        assert mock_post.call_args_list[1].kwargs["json"] == {"content": "⚠️ 絵文字 & 記号 <> \"' \n改行"}
+        assert mock_post.call_args_list[0].kwargs["json"] == {"content": "", "allowed_mentions": {"parse": []}}
+        assert mock_post.call_args_list[1].kwargs["json"] == {"content": "⚠️ 絵文字 & 記号 <> \"' \n改行", "allowed_mentions": {"parse": []}}
 
     def test_extract_retry_after_fallback_branches(self):
         # JSON が非 dict の場合 + Retry-After ヘッダ無し -> デフォルト 1.0 秒

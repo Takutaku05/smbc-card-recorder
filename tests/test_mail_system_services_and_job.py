@@ -393,7 +393,8 @@ class TestEndToEndFlow:
             mock_post.assert_called_once_with(
                 "https://discord.com/api/webhooks/e2e/token",
                 json={
-                    "content": "【正常に書き込みました】\nシート: 11月 (3行目)\n利用先: スーパーA\n金額: 2580"
+                    "content": "【正常に書き込みました】\nシート: 11月 (3行目)\n利用先: スーパーA\n金額: 2580",
+                    "allowed_mentions": {"parse": []},
                 },
                 timeout=5,
             )

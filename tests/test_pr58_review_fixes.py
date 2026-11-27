@@ -382,6 +382,15 @@ class TestDiscord:
         )
         session.post.assert_not_called()
 
+    def test_mentions_in_mail_derived_text_are_not_parsed(self):
+        session = MagicMock()
+        session.post.return_value = MagicMock(ok=True)
+        mailDisco.DiscordNotifier(webhook_url="https://example.invalid/hook", session=session).send(
+            "件名: @everyone 至急"
+        )
+        payload = session.post.call_args.kwargs["json"]
+        assert payload["allowed_mentions"] == {"parse": []}
+
     def test_mail_disco_max_retries_zero_does_not_wait_on_rate_limit(self):
         session = MagicMock()
         session.post.return_value = MagicMock(ok=False, status_code=429)

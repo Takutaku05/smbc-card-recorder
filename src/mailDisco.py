@@ -109,6 +109,8 @@ class DiscordNotifier:
 
         payload = {
             "content": self._truncate_message(str(message)),
+            # メール由来の件名・利用先に "@everyone" 等が含まれてもメンションとして解釈させない
+            "allowed_mentions": {"parse": []},
         }
 
         try:

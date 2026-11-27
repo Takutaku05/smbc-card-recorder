@@ -25,7 +25,7 @@ def test_discord_notifier_sends_successfully():
     assert notifier.send("hello") is True
     session.post.assert_called_once_with(
         "https://example.invalid/hook",
-        json={"content": "hello"},
+        json={"content": "hello", "allowed_mentions": {"parse": []}},
         timeout=mailDisco.DEFAULT_TIMEOUT,
     )
 
