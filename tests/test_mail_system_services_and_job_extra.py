@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from google.auth.transport.requests import Request
+from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
 
 import src.mailSystem as mailSystem
@@ -129,7 +130,7 @@ class TestInitializeServicesExtra:
     ):
         self._token(tmp_path, '{"keep": 1}')
         creds = MagicMock(valid=False, expired=True, refresh_token="r")
-        creds.refresh.side_effect = RuntimeError("invalid_grant")
+        creds.refresh.side_effect = RefreshError("invalid_grant")
         with (
             patch(
                 "src.mailSystem.GmailCredentials.from_authorized_user_file",

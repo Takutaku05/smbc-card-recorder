@@ -132,6 +132,7 @@ def run_main_block(
     sleep_effects=(None, KeyboardInterrupt),
     gmail=None,
     on_sleep=None,
+    service_account_side_effect=None,
 ):
     """
     src/mailSystem.py の __main__ ブロックを一時ディレクトリ隔離のもと安全に実行するヘルパー。
@@ -220,7 +221,11 @@ def run_main_block(
                     side_effect=_flow_factory,
                 ),
                 patch("googleapiclient.discovery.build", return_value=gmail),
-                patch("gspread.service_account", return_value=MagicMock()),
+                patch(
+                    "gspread.service_account",
+                    return_value=MagicMock(),
+                    side_effect=service_account_side_effect,
+                ),
                 patch("os.path.join", side_effect=_join),
                 patch("builtins.open", side_effect=_open),
                 patch("os.open", side_effect=_os_open),

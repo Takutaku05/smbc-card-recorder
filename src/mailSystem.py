@@ -14,7 +14,7 @@ from src.logger_config import setup_logger
 
 import schedule
 
-from google.auth.exceptions import RefreshError
+from google.auth.exceptions import RefreshError, TransportError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials as GmailCredentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -22,6 +22,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 import gspread
+import requests
 
 # --- ロガーの初期化 ---
 logger = setup_logger(__name__)
@@ -34,7 +35,9 @@ TOKEN_FILE = os.path.join(BASE_DIR, "config", "gmailtoken.json")
 LAST_RUN_FILE = os.path.join(BASE_DIR, "config", "last_run_time.json")
 PROCESSED_IDS_FILE = os.path.join(BASE_DIR, "config", "processed_message_ids.json")
 FAILED_ATTEMPTS_FILE = os.path.join(BASE_DIR, "config", "failed_message_attempts.json")
-PROCESSED_IDS_MAX_ENTRIES = 2000
+# 処理済みIDの件数上限（ファイル肥大化の安全弁）。90日の保持期間内のIDを件数で切り捨てると
+# 検索範囲内のメールが二重記録され得るため、通常の利用（main からの移行を含む）では到達しない値にする
+PROCESSED_IDS_MAX_ENTRIES = 20000
 PROCESSED_IDS_RETENTION_DAYS = 90
 # Gmail 検索範囲の上限（日数）。処理済みIDの保持日数より短くし、パージ済みIDのメールが
 # 再検索されて二重記録されることを防ぐ（処理時刻 >= メール受信時刻のため、この範囲のメールのIDは必ず保持されている）
@@ -46,6 +49,12 @@ _processed_id_timestamps = {}
 _message_failure_counts = {}
 # SIGTERM 受信時に立てる停止要求フラグ（シグナルハンドラ内では I/O を行わない）
 _shutdown_requested = False
+# initialize_services() の失敗が一時的（ネットワーク等）なものだったか。終了コードの決定に使う
+_init_failure_transient = False
+# 起動失敗時の終了コード。設定・認証の誤りは再起動しても直らないため、systemd が再起動しないよう区別する
+EXIT_TRANSIENT_FAILURE = 1
+EXIT_CONFIG_FAILURE = 2
+SHEETS_HTTP_TIMEOUT_SECONDS = 30
 
 
 def _resolve_config_path(file_path):
@@ -80,6 +89,63 @@ _refresh_error_notified = False
 
 # sheet() の戻り値: 抽出失敗(N/A)のため記録をスキップした（再試行しても結果が変わらないため処理済み扱いにする）
 SHEET_SKIPPED = "skipped"
+# sheet() の戻り値: 行追加がサーバーエラーで失敗したが、実際には書き込まれた可能性がある
+# （再試行すると二重追加になり得るため処理済みにし、手動確認を通知する）
+SHEET_UNCERTAIN = "uncertain"
+
+
+def _api_error_status(err):
+    """
+    gspread の APIError から HTTP ステータスを取得する。
+
+    HTML の 502/503/504 等で JSON を解析できないと ``err.code`` は -1 になるため、レスポンスのステータスで補う。
+    """
+    if isinstance(err.code, int) and err.code > 0:
+        return err.code
+    return getattr(err.response, "status_code", -1)
+
+
+def _is_transient_error(error):
+    """ネットワーク障害・タイムアウト・サーバー側の一時エラーであれば True を返す。"""
+    if isinstance(
+        error,
+        (
+            TransportError,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+        ),
+    ):
+        return True
+    if isinstance(error, gspread.exceptions.APIError):
+        status = _api_error_status(error)
+    elif isinstance(error, HttpError):
+        status = getattr(error.resp, "status", -1)
+    else:
+        return False
+    return status in (408, 429) or status >= 500
+
+
+class _AmbiguousAppendError(Exception):
+    """行追加がサーバーエラー・タイムアウトで失敗し、書き込まれたかどうか判別できないことを表す。"""
+
+
+def _append_row(worksheet, row):
+    """
+    ``append_row`` を実行し、書き込み結果が不明な失敗は :class:`_AmbiguousAppendError` に変換する。
+
+    5xx / 408 / 読み取りタイムアウトはサーバー側で追加済みの可能性があり、次回ジョブで再試行すると
+    同じ行が二重に追加され得るため、通常の失敗（False → 再試行）と区別する。
+    """
+    try:
+        worksheet.append_row(row)
+    except gspread.exceptions.APIError as e:
+        status = _api_error_status(e)
+        if status == 408 or status >= 500:
+            raise _AmbiguousAppendError(e) from e
+        raise
+    except requests.exceptions.ReadTimeout as e:
+        raise _AmbiguousAppendError(e) from e
+
 
 # sheet() の書き込み失敗通知を送るか。check_mail_job が再試行中のメールでは False にし、
 # Sheets 障害中に「滞留メール数 × 再試行回数」の通知が届かないようにする（打ち切り時は別途通知される）
@@ -125,12 +191,7 @@ class BoundedBackOffHTTPClient(gspread.http_client.HTTPClient):
             try:
                 return super().request(method, endpoint, *args, **kwargs)
             except gspread.exceptions.APIError as err:
-                # HTML の 502/503/504 等で JSON を解析できないと err.code は -1 になるため、HTTP ステータスで補う
-                status_code = (
-                    err.code
-                    if isinstance(err.code, int) and err.code > 0
-                    else getattr(err.response, "status_code", -1)
-                )
+                status_code = _api_error_status(err)
                 if attempt >= self.MAX_RETRIES or not self._should_retry(
                     method, status_code
                 ):
@@ -168,6 +229,72 @@ def _extract_charset(part):
     return None
 
 
+_ISO2022JP_CP932 = "iso-2022-jp (cp932 extension)"
+
+
+def _decode_iso2022jp_as_cp932(data):
+    """
+    ISO-2022-JP のバイト列を Shift_JIS に変換し、CP932 としてデコードする。
+
+    Windows 由来の ISO-2022-JP メールに含まれる NEC 特殊文字（①・㈱ 等、JIS 13区）や
+    IBM 拡張文字にも対応する（いわゆる CP50220 相当）。
+
+    :param data: ISO-2022-JP エンコードのバイト列
+    :type data: bytes
+    :return: デコードされた文字列
+    :rtype: str
+    :raises UnicodeDecodeError: 未知のエスケープシーケンスや不正なバイト列を含む場合
+    """
+    escapes = {
+        b"\x1b(B": "ascii",
+        b"\x1b(J": "ascii",
+        b"\x1b$@": "jis",
+        b"\x1b$B": "jis",
+        b"\x1b(I": "kana",
+    }
+    out = bytearray()
+    mode = "ascii"
+    i = 0
+    while i < len(data):
+        byte = data[i]
+        if byte == 0x1B:
+            mode = escapes.get(bytes(data[i : i + 3]))
+            if mode is None:
+                raise UnicodeDecodeError(
+                    _ISO2022JP_CP932, data, i, i + 1, "unknown escape sequence"
+                )
+            i += 3
+        elif mode == "ascii" or byte in (0x0A, 0x0D):
+            out.append(byte)
+            i += 1
+        elif mode == "kana":
+            out.append(byte + 0x80)
+            i += 1
+        else:
+            if i + 1 >= len(data) or not (
+                0x21 <= byte <= 0x7E and 0x21 <= data[i + 1] <= 0x7E
+            ):
+                raise UnicodeDecodeError(
+                    _ISO2022JP_CP932, data, i, i + 2, "invalid JIS X 0208 sequence"
+                )
+            row, cell = byte, data[i + 1]
+            lead = ((row + 1) >> 1) + 0x70
+            if lead > 0x9F:
+                lead += 0x40
+            if row & 1:
+                trail = cell + 0x1F + (1 if cell >= 0x60 else 0)
+            else:
+                trail = cell + 0x7E
+            out += bytes((lead, trail))
+            i += 2
+    try:
+        return bytes(out).decode("cp932")
+    except UnicodeDecodeError as e:
+        raise UnicodeDecodeError(
+            _ISO2022JP_CP932, data, 0, len(data), f"cp932 conversion failed: {e.reason}"
+        ) from e
+
+
 def decode_base64_url_safe(data, charset=None):
     """
     URLセーフなBase64エンコードデータをデコードする。
@@ -188,10 +315,13 @@ def decode_base64_url_safe(data, charset=None):
     candidates = []
     if charset:
         candidates.append(charset)
-    # ISO-2022-JP は7bit文字コードのため、UTF-8より先にESCバイト有無で判定する
     if b"\x1b" in decoded_bytes:
-        candidates.append("iso-2022-jp")
-    candidates.extend(["utf-8", "iso-2022-jp", "euc_jp", "cp932"])
+        # ESC を含む7bitデータは ISO-2022-JP。UTF-8 等へフォールバックすると ESC が混ざったまま
+        # 「成功」してしまうため候補にしない。①・㈱ などの NEC 特殊文字は Python の iso-2022-jp
+        # コーデックで読めないため、Shift_JIS に変換して CP932 としてデコードする方式を最後に試す
+        candidates.extend(["iso-2022-jp", _ISO2022JP_CP932])
+    else:
+        candidates.extend(["utf-8", "iso-2022-jp", "euc_jp", "cp932"])
 
     tried = set()
     last_error = None
@@ -201,6 +331,8 @@ def decode_base64_url_safe(data, charset=None):
             continue
         tried.add(key)
         try:
+            if encoding == _ISO2022JP_CP932:
+                return _decode_iso2022jp_as_cp932(decoded_bytes)
             return decoded_bytes.decode(encoding)
         except (LookupError, UnicodeDecodeError) as err:
             if isinstance(err, UnicodeDecodeError):
@@ -414,7 +546,7 @@ def load_processed_ids():
             _processed_id_timestamps = pruned
             processed_ids = set(pruned.keys())
             logger.info("処理済みメールIDを %d 件ロードしました。", len(processed_ids))
-        except (json.JSONDecodeError, TypeError, OSError) as e:
+        except (json.JSONDecodeError, TypeError, ValueError, OSError) as e:
             logger.warning(
                 "処理済みメールIDファイル '%s' が不正です。新しく作成します。エラー: %s",
                 PROCESSED_IDS_FILE,
@@ -706,7 +838,7 @@ def sheet(email_time, location, money):
                 "ワークシートの値の取得に失敗しました: %s。末尾に追加を試みます。",
                 e_get_values,
             )
-            worksheet.append_row(data_to_log)
+            _append_row(worksheet, data_to_log)
             logger.info(
                 "ワークシートの値取得に失敗したため、最終行にデータ '%s' が追加されました。",
                 data_to_log,
@@ -716,7 +848,7 @@ def sheet(email_time, location, money):
 
         target_row_index = -1
         if not all_values:  # シートが完全に空の場合
-            worksheet.append_row(data_to_log)
+            _append_row(worksheet, data_to_log)
             logger.info(
                 "シートが空だったため、1行目にデータ '%s' が追加されました。",
                 data_to_log,
@@ -728,7 +860,7 @@ def sheet(email_time, location, money):
         target_row_index = find_target_row(all_values)
 
         if target_row_index is None:  # A〜D列が空の行が見つからなかった場合
-            worksheet.append_row(data_to_log)
+            _append_row(worksheet, data_to_log)
             logger.info(
                 "A〜D列が空の行が見つからなかったため、最終行にデータ '%s' が追加されました。",
                 data_to_log,
@@ -747,6 +879,19 @@ def sheet(email_time, location, money):
             _notify_write_success(f"{target_row_index}行目")
             return True
 
+    except _AmbiguousAppendError as e:
+        logger.error(
+            "行追加がサーバーエラーで失敗しましたが、書き込まれた可能性があるため再試行しません: %s",
+            e,
+        )
+        # 最終結果のため再試行中かどうかに関わらず通知する
+        mailDisco.MailDisco(
+            "⚠️ スプレッドシートへの行追加がサーバーエラーで失敗しました。"
+            "書き込まれている可能性があるため、二重記録を避けて再試行しません。\n"
+            f"シートに記録されているか確認し、無ければ手動で記録してください。\n"
+            f"利用日: {email_time} / 利用先: {location} / 金額: {money}\nエラー: {e}"
+        ).send()
+        return SHEET_UNCERTAIN
     except gspread.exceptions.SpreadsheetNotFound:
         # キャッシュが古い可能性があるため破棄し、次回は再取得する
         _cached_spreadsheet = None
@@ -805,6 +950,10 @@ def timesheet(time):
     return f"{time_object.month}月"
 
 
+# 「ご利用金額：…」のような別項目の行（またはコロンを含む行）。利用先の値を次の行から拾う際に除外する
+_LABEL_LINE_RE = re.compile(r"(?:ご?利用(?:日時?|先|場所|金額)|[^\r\n]*[:：])")
+
+
 def _is_valid_datetime(text):
     """
     ``YYYY/M/D H:MM`` または ``YYYY/M/D H:MM:SS`` 形式の日時文字列が暦上有効かを判定する。
@@ -849,14 +998,16 @@ def parse_mail_body(mes_body):
         utilization_datetime = "N/A"
 
     utilization_location_match = re.search(
-        r"(?:利用先|ご利用場所)[ \t\u3000]*[:：][ \t\u3000]*([^\r\n]*)",
+        r"(?:利用先|ご利用場所)[ \t\u3000]*[:：][ \t\u3000]*([^\r\n]*)(?:\r?\n[ \t\u3000]*([^\r\n]*))?",
         mes_body,
     )
-    raw_location = (
-        utilization_location_match.group(1).strip()
-        if utilization_location_match
-        else ""
-    )
+    raw_location = ""
+    if utilization_location_match:
+        raw_location = utilization_location_match.group(1).strip()
+        next_line = (utilization_location_match.group(2) or "").strip()
+        # 値がコロンの次の行にある書式に対応する。ただし次の行が別の項目（ご利用金額：… 等）なら値とみなさない
+        if not raw_location and next_line and not _LABEL_LINE_RE.match(next_line):
+            raw_location = next_line
     utilization_location = raw_location if raw_location else "N/A"
 
     utilization_amount_match = re.search(
@@ -932,7 +1083,10 @@ def _write_token_atomic(token_path, content):
             )
 
     tmp_path = f"{token_path}.tmp"
-    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # 前回の異常終了で残った .tmp は権限が緩い可能性があるため削除し、0600 で新規作成する
+    if os.path.exists(tmp_path):
+        os.remove(tmp_path)
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as token_file:
             token_file.write(content)
@@ -1010,9 +1164,11 @@ def initialize_services():
         _worksheet_cache, \
         _gmail_creds, \
         _last_saved_token_json, \
-        _refresh_error_notified
+        _refresh_error_notified, \
+        _init_failure_transient
 
     logger.info("--- サービス初期化開始 ---")
+    _init_failure_transient = False
 
     # Gmail認証
     gmail_creds = None
@@ -1034,7 +1190,7 @@ def initialize_services():
             try:
                 gmail_creds.refresh(Request())
                 logger.info("Gmailトークンをリフレッシュしました。")
-            except Exception as e:
+            except RefreshError as e:
                 logger.error("Gmailトークンのリフレッシュに失敗: %s", e, exc_info=True)
                 logger.error(
                     "'credentials.json' を確認し、 'gmailtoken.json' を削除して再認証してください。"
@@ -1045,6 +1201,15 @@ def initialize_services():
                         "config/gmailtoken.json を削除してプログラムを再起動し、再認証してください。"
                     ).send()
                     _refresh_error_notified = True
+                return False
+            except Exception as e:
+                # 起動直後の DNS 未解決などトークン失効以外の失敗。トークンを削除させると
+                # ヘッドレス環境ではブラウザ認証待ちで復旧できなくなるため、削除は案内せず再起動で再試行する
+                logger.error(
+                    "Gmailトークンのリフレッシュ中にネットワーク等のエラーが発生しました（再起動後に再試行します）: %s",
+                    e,
+                )
+                _init_failure_transient = True
                 return False
         else:
             try:
@@ -1087,6 +1252,7 @@ def initialize_services():
             error,
             exc_info=True,
         )
+        _init_failure_transient = _is_transient_error(error)
         return False  # 初期化失敗
 
     # GSpread認証と必須設定の検証
@@ -1111,6 +1277,8 @@ def initialize_services():
             scopes=SCOPES_SHEET,
             http_client=BoundedBackOffHTTPClient,
         )
+        # gspread の既定はタイムアウトなし。応答のない通信でジョブや停止処理が止まり続けないようにする
+        gc.set_timeout(SHEETS_HTTP_TIMEOUT_SECONDS)
         spreadsheet = gc.open_by_key(SPREADSHEET_ID)
         _cached_gc = gc
         _cached_spreadsheet_id = SPREADSHEET_ID
@@ -1132,6 +1300,13 @@ def initialize_services():
         ).send()
         return False
     except Exception as e:
+        if _is_transient_error(e):
+            logger.error(
+                "Google スプレッドシートAPIへの接続中にネットワーク等の一時的なエラーが発生しました（再起動後に再試行します）: %s",
+                e,
+            )
+            _init_failure_transient = True
+            return False
         logger.error("Google スプレッドシートAPIの認証エラー: %s", e, exc_info=True)
         logger.error(
             "サービスアカウントのメールアドレスをスプレッドシートに共有（編集者権限）したか確認してください。"
@@ -1279,7 +1454,16 @@ def check_mail_job():
                             result = system(body)
                         finally:
                             _sheet_failure_notify_enabled = True
-                        if result == SHEET_SKIPPED:
+                        if result == SHEET_UNCERTAIN:
+                            # 二重追加を避けるため処理済みにする（手動確認の通知は sheet() 内で送信済み）
+                            processed_ids.add(message_id)
+                            save_processed_ids()
+                            saved_in_loop = True
+                            logger.warning(
+                                "メールID %s は書き込み結果が不明なため処理済みとしてマークしました。",
+                                message_id,
+                            )
+                        elif result == SHEET_SKIPPED:
                             # 抽出失敗は再試行しても解消しないため処理済みにし、永久リトライを防ぐ（通知は sheet() 内で送信済み）
                             processed_ids.add(message_id)
                             save_processed_ids()
@@ -1346,6 +1530,15 @@ def check_mail_job():
             else:
                 logger.info("新しい未処理メールはありませんでした（処理済みを除く）。")
 
+        # 失敗中にゴミ箱へ移した等で検索結果に出なくなったメールの失敗回数は不要なため削除する
+        # （失敗が残っている間は last_run_time を進めないため、再試行対象は必ず検索結果に含まれる）
+        found_ids = {m["id"] for m in messages}
+        orphan_ids = [mid for mid in _message_failure_counts if mid not in found_ids]
+        if orphan_ids:
+            for mid in orphan_ids:
+                del _message_failure_counts[mid]
+            save_message_failure_counts()
+
         if had_failure:
             logger.warning(
                 "処理に失敗したメールがあるため、last_run_time を更新せず次回再試行します。"
@@ -1403,12 +1596,12 @@ def _shutdown():
 
 
 if __name__ == "__main__":
-    signal.signal(signal.SIGTERM, _handle_sigterm)
-
     load_processed_ids()  # 最初に処理済みIDをロード
     load_message_failure_counts()
 
     if initialize_services():  # サービス初期化
+        # 初期化（ブラウザ認証待ちを含む）の間は既定動作のまま即終了できるよう、ここで登録する
+        signal.signal(signal.SIGTERM, _handle_sigterm)
         logger.info("サービス初期化完了。スケジューラーを開始します。")
         mailDisco.MailDisco("--- メール監視システムを起動しました ---").send()
 
@@ -1437,10 +1630,18 @@ if __name__ == "__main__":
             logger.info("プログラムを停止しました。")
         _shutdown()
 
+    elif _init_failure_transient:
+        # ネットワーク等の一時的な失敗: systemd の Restart=on-failure で再起動して再試行する。
+        # 再起動のたびに通知が届かないよう Discord には送らない（起動に成功すると起動通知が届く）
+        logger.error(
+            "一時的なエラーでサービスを初期化できませんでした。終了コード %d で終了します。",
+            EXIT_TRANSIENT_FAILURE,
+        )
+        raise SystemExit(EXIT_TRANSIENT_FAILURE)
     else:
+        # 設定・認証の誤り: 再起動しても直らないため、RestartPreventExitStatus で再起動させない終了コードにする
         logger.error("サービスの初期化に失敗したため、プログラムを終了します。")
         mailDisco.MailDisco(
             "❌ サービスの初期化に失敗しました。プログラムを終了します。"
         ).send()
-        # systemd の Restart=on-failure で自動再起動されるよう、異常終了コードで終了する
-        raise SystemExit(1)
+        raise SystemExit(EXIT_CONFIG_FAILURE)

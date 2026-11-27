@@ -79,8 +79,8 @@ class TestMainEntrypointExtra:
         assert result["disco_messages"] == [
             "❌ サービスの初期化に失敗しました。プログラムを終了します。"
         ]
-        # systemd の Restart=on-failure が発動するよう非ゼロで終了する
-        assert result["exit_code"] == 1
+        # 設定・認証の誤りは再起動しても直らないため、RestartPreventExitStatus 用の終了コード 2 で終了する
+        assert result["exit_code"] == mailSystem.EXIT_CONFIG_FAILURE == 2
         result["run_pending"].assert_not_called()
         result["sleep"].assert_not_called()
         assert schedule_mod.jobs == []

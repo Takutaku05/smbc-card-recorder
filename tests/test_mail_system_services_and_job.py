@@ -4,6 +4,7 @@ import logging
 from unittest.mock import MagicMock, patch
 
 import gspread
+from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
 
 import src.mailDisco as mailDisco
@@ -67,7 +68,7 @@ class TestInitializeServices:
         token_path.write_text("{}", encoding="utf-8")
 
         mock_creds = MagicMock(valid=False, expired=True, refresh_token="refresh-tok")
-        mock_creds.refresh.side_effect = RuntimeError("invalid_grant")
+        mock_creds.refresh.side_effect = RefreshError("invalid_grant")
 
         with patch("src.mailSystem.GmailCredentials.from_authorized_user_file", return_value=mock_creds), \
              patch("src.mailSystem.mailDisco.MailDisco"), \

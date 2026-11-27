@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch
 
 import gspread
 import pytest
+import requests
 
 import src.logger_config as logger_config
 import src.mailDisco as mailDisco
@@ -557,3 +558,309 @@ class TestSecondReviewFixes:
             (tmp_path / "failed_message_attempts.json").read_text(encoding="utf-8")
         )
         assert saved == {"first": 1}
+
+
+# ---------------------------------------------------------------------------
+# 3回目のレビュー指摘への対応
+# ---------------------------------------------------------------------------
+class TestStartupFailureClassification:
+    def _expired_creds(self, tmp_path):
+        (tmp_path / "gmailtoken.json").write_text("{}", encoding="utf-8")
+        return MagicMock(valid=False, expired=True, refresh_token="r")
+
+    def test_network_error_on_refresh_is_transient_and_does_not_advise_token_deletion(
+        self, tmp_path, caplog
+    ):
+        from google.auth.exceptions import TransportError
+
+        creds = self._expired_creds(tmp_path)
+        creds.refresh.side_effect = TransportError("Name resolution failed")
+        with (
+            patch(
+                "src.mailSystem.GmailCredentials.from_authorized_user_file",
+                return_value=creds,
+            ),
+            patch("src.mailSystem.mailDisco.MailDisco") as disco,
+            caplog.at_level(logging.ERROR, logger=LOGGER),
+        ):
+            assert mailSystem.initialize_services() is False
+        assert mailSystem._init_failure_transient is True
+        disco.assert_not_called()
+        assert "削除" not in caplog.text
+        # トークンには触れない
+        assert (tmp_path / "gmailtoken.json").read_text(encoding="utf-8") == "{}"
+
+    def test_refresh_error_is_permanent_and_advises_reauth(self, tmp_path):
+        from google.auth.exceptions import RefreshError
+
+        creds = self._expired_creds(tmp_path)
+        creds.refresh.side_effect = RefreshError("invalid_grant")
+        with (
+            patch(
+                "src.mailSystem.GmailCredentials.from_authorized_user_file",
+                return_value=creds,
+            ),
+            patch("src.mailSystem.mailDisco.MailDisco") as disco,
+        ):
+            assert mailSystem.initialize_services() is False
+        assert mailSystem._init_failure_transient is False
+        assert "gmailtoken.json を削除" in disco.call_args.args[0]
+
+    @pytest.mark.parametrize(
+        ("error", "transient"),
+        [
+            (requests.exceptions.ConnectionError("dns"), True),
+            (requests.exceptions.ReadTimeout("slow"), True),
+            (_api_error(503), True),
+            (_api_error(429), True),
+            (_api_error(403), False),
+            (ValueError("bad key file"), False),
+        ],
+    )
+    def test_sheets_init_error_classification(self, tmp_path, error, transient):
+        (tmp_path / "gmailtoken.json").write_text("{}", encoding="utf-8")
+        with (
+            patch(
+                "src.mailSystem.GmailCredentials.from_authorized_user_file",
+                return_value=MagicMock(valid=True),
+            ),
+            patch("src.mailSystem.build"),
+            patch("src.mailSystem.gspread.service_account", side_effect=error),
+        ):
+            assert mailSystem.initialize_services() is False
+        assert mailSystem._init_failure_transient is transient
+
+    def test_gmail_build_http_error_classification(self, tmp_path):
+        from googleapiclient.errors import HttpError
+
+        (tmp_path / "gmailtoken.json").write_text("{}", encoding="utf-8")
+        with (
+            patch(
+                "src.mailSystem.GmailCredentials.from_authorized_user_file",
+                return_value=MagicMock(valid=True),
+            ),
+            patch(
+                "src.mailSystem.build",
+                side_effect=HttpError(MagicMock(status=503, reason="x"), b"{}"),
+            ),
+        ):
+            assert mailSystem.initialize_services() is False
+        assert mailSystem._init_failure_transient is True
+
+    def test_is_transient_error_ignores_unrelated_exceptions(self):
+        assert mailSystem._is_transient_error(RuntimeError("x")) is False
+
+    def test_sheets_client_gets_http_timeout(self, tmp_path):
+        (tmp_path / "gmailtoken.json").write_text("{}", encoding="utf-8")
+        gc = MagicMock()
+        with (
+            patch(
+                "src.mailSystem.GmailCredentials.from_authorized_user_file",
+                return_value=MagicMock(valid=True),
+            ),
+            patch("src.mailSystem.build"),
+            patch("src.mailSystem.gspread.service_account", return_value=gc),
+        ):
+            assert mailSystem.initialize_services() is True
+        gc.set_timeout.assert_called_once_with(mailSystem.SHEETS_HTTP_TIMEOUT_SECONDS)
+
+    def test_main_exits_with_1_without_discord_on_transient_failure(self):
+        from tests.conftest import run_main_block
+
+        result = run_main_block(
+            service_account_side_effect=requests.exceptions.ConnectionError("dns")
+        )
+        assert result["exit_code"] == mailSystem.EXIT_TRANSIENT_FAILURE == 1
+        # 再起動のたびに通知が届かないよう、一時的な失敗では Discord に送らない
+        assert result["disco_messages"] == []
+        result["run_pending"].assert_not_called()
+
+    def test_sigterm_handler_is_registered_only_after_initialization(self):
+        import signal
+
+        from tests.conftest import run_main_block
+
+        before = signal.getsignal(signal.SIGTERM)
+        seen = {}
+
+        def _capture(*_a, **_k):
+            seen["handler"] = signal.getsignal(signal.SIGTERM)
+            raise requests.exceptions.ConnectionError("dns")
+
+        run_main_block(service_account_side_effect=_capture)
+        # 初期化中はまだ既定のハンドラ（即終了できる）
+        assert seen["handler"] is before
+
+
+class TestAmbiguousAppend:
+    def _gc_with_ws(self, ws):
+        spreadsheet = MagicMock()
+        spreadsheet.worksheet.return_value = ws
+        gc = MagicMock()
+        gc.open_by_key.return_value = spreadsheet
+        return gc
+
+    @pytest.mark.parametrize(
+        "error",
+        [_api_error(503), _api_error(408), requests.exceptions.ReadTimeout("slow")],
+    )
+    def test_server_error_on_append_returns_uncertain_and_notifies(self, error):
+        ws = MagicMock()
+        ws.get_all_values.return_value = []  # 空シート → append_row
+        ws.append_row.side_effect = error
+        mailSystem.gc = self._gc_with_ws(ws)
+        with (
+            patch("src.mailSystem.mailDisco.MailDisco") as disco,
+            patch("src.mailSystem.purpose.Purpose"),
+        ):
+            result = mailSystem.sheet("2026/11/20 12:34", "スーパーA", 1000)
+        assert result == mailSystem.SHEET_UNCERTAIN
+        message = disco.call_args.args[0]
+        assert "書き込まれている可能性" in message
+        assert "スーパーA" in message
+
+    def test_client_error_on_append_is_ordinary_failure(self):
+        ws = MagicMock()
+        ws.get_all_values.return_value = []
+        ws.append_row.side_effect = _api_error(400)
+        mailSystem.gc = self._gc_with_ws(ws)
+        with (
+            patch("src.mailSystem.mailDisco.MailDisco"),
+            patch("src.mailSystem.purpose.Purpose"),
+        ):
+            assert mailSystem.sheet("2026/11/20 12:34", "スーパーA", 1000) is False
+
+    def test_uncertain_result_marks_processed_without_retry(self, tmp_path):
+        mailSystem.gmail_service = _gmail(["u1"])
+        mailSystem.gc = MagicMock()
+        with (
+            patch.object(mailSystem, "get_email_body", return_value="body"),
+            patch.object(mailSystem, "system", return_value=mailSystem.SHEET_UNCERTAIN),
+        ):
+            mailSystem.check_mail_job()
+        assert "u1" in mailSystem.processed_ids
+        assert mailSystem._message_failure_counts == {}
+        assert (tmp_path / "last_run_time.json").exists()
+
+
+class TestIso2022JpExtendedChars:
+    # ① = JIS 0x2D21, ㈱ = JIS 0x2D6A（NEC 特殊文字）
+    RAW = (
+        b"\x1b$B"
+        + b"\x2d\x21\x2d\x6a"
+        + "スーパー".encode("iso-2022-jp")[3:-3]
+        + b"\x1b(B"
+        + b" ABC\r\n"
+    )
+
+    def test_nec_special_chars_are_decoded_via_cp932(self):
+        import base64
+
+        encoded = base64.urlsafe_b64encode(self.RAW).decode()
+        assert mailSystem.decode_base64_url_safe(encoded) == "①㈱スーパー ABC\r\n"
+
+    def test_declared_iso_2022_jp_charset_also_falls_back_to_cp932(self):
+        import base64
+
+        encoded = base64.urlsafe_b64encode(self.RAW).decode()
+        assert mailSystem.decode_base64_url_safe(
+            encoded, charset="iso-2022-jp"
+        ).startswith("①㈱")
+
+    def test_halfwidth_kana_escape_is_supported(self):
+        # ESC ( I による JIS X 0201 片仮名（ｱ = 0x31）
+        assert mailSystem._decode_iso2022jp_as_cp932(b"\x1b(I\x31\x1b(B") == "ｱ"
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            b"\x1b$Z\x21\x21",  # 未知のエスケープシーケンス
+            b"\x1b$B\x21",  # 2バイト目が欠けている
+            b"\x1b$B\x80\x21",  # JIS の範囲外
+            b"\x1b$B\x7f\x21",  # 変換後も CP932 で未定義
+        ],
+    )
+    def test_invalid_sequences_raise_unicode_decode_error(self, raw):
+        with pytest.raises(UnicodeDecodeError):
+            mailSystem._decode_iso2022jp_as_cp932(raw)
+
+    def test_esc_data_never_falls_back_to_utf8_with_raw_escape(self):
+        import base64
+
+        encoded = base64.urlsafe_b64encode(b"\x1b$Z\x21\x21").decode()
+        with pytest.raises(UnicodeDecodeError):
+            mailSystem.decode_base64_url_safe(encoded)
+
+
+class TestLocationOnNextLine:
+    def test_value_on_next_line_is_captured(self):
+        parsed = mailSystem.parse_mail_body(
+            "ご利用日時：2026/11/20 12:34\nご利用場所：\n　ＡＢＣストア\nご利用金額：500円"
+        )
+        assert parsed["location"] == "ＡＢＣストア"
+
+    @pytest.mark.parametrize(
+        "next_line", ["ご利用金額：500円", "利用金額 500円", "備考：なし"]
+    )
+    def test_next_line_that_is_another_label_is_not_captured(self, next_line):
+        parsed = mailSystem.parse_mail_body(f"ご利用場所：\n{next_line}")
+        assert parsed["location"] == "N/A"
+
+    def test_same_line_value_takes_precedence(self):
+        parsed = mailSystem.parse_mail_body("ご利用場所：スーパーA\n次の行")
+        assert parsed["location"] == "スーパーA"
+
+
+class TestMiscThirdReview:
+    def test_processed_ids_file_with_invalid_utf8_is_reset_and_notified(self, tmp_path):
+        (tmp_path / "processed_message_ids.json").write_bytes(b"\xff\xfe\x00broken")
+        with patch("src.mailSystem.mailDisco.MailDisco") as disco:
+            mailSystem.load_processed_ids()
+        assert mailSystem.processed_ids == set()
+        disco.assert_called_once()
+
+    def test_stale_token_tmp_with_loose_permission_is_replaced_by_0600(self, tmp_path):
+        token_path = tmp_path / "gmailtoken.json"
+        stale = tmp_path / "gmailtoken.json.tmp"
+        stale.write_text("old", encoding="utf-8")
+        os.chmod(stale, 0o644)
+        mailSystem._write_token_atomic(str(token_path), '{"t": 2}')
+        assert oct(os.stat(token_path).st_mode & 0o777) == "0o600"
+        assert token_path.read_text(encoding="utf-8") == '{"t": 2}'
+        assert not stale.exists()
+
+    def test_orphan_failure_counts_are_pruned_when_mail_disappears(self, tmp_path):
+        mailSystem._message_failure_counts = {"trashed": 2, "still_here": 1}
+        mailSystem.gmail_service = _gmail(["still_here"])
+        mailSystem.gc = MagicMock()
+        with (
+            patch.object(mailSystem, "get_email_body", return_value=""),
+            patch("src.mailSystem.mailDisco.MailDisco"),
+        ):
+            mailSystem.check_mail_job()
+        assert mailSystem._message_failure_counts == {"still_here": 2}
+        assert json.loads(
+            (tmp_path / "failed_message_attempts.json").read_text(encoding="utf-8")
+        ) == {"still_here": 2}
+
+    def test_migrating_large_legacy_id_list_keeps_all_ids(self, tmp_path):
+        legacy = [f"id{i}" for i in range(2500)]
+        (tmp_path / "processed_message_ids.json").write_text(
+            json.dumps(legacy), encoding="utf-8"
+        )
+        mailSystem.load_processed_ids()
+        mailSystem.save_processed_ids()
+        assert mailSystem.processed_ids == set(legacy)
+
+
+@pytest.mark.parametrize("text", ["漢字", "腕輪", "龠", "スーパー", "ご利用金額：1,000円"])
+def test_iso2022jp_cp932_decoder_matches_standard_codec_for_jis_x_0208(text):
+    """偶数区・奇数区・0x5F区以降のいずれも標準の iso-2022-jp コーデックと同じ結果になる。"""
+    raw = text.encode("iso-2022-jp")
+    assert mailSystem._decode_iso2022jp_as_cp932(raw) == raw.decode("iso-2022-jp")
+
+
+def test_iso2022jp_cp932_decoder_rejects_chars_undefined_in_cp932():
+    # JIS 9区（0x29xx）は Shift_JIS 0x85xx に対応し、CP932 では未定義
+    with pytest.raises(UnicodeDecodeError, match="cp932 conversion failed"):
+        mailSystem._decode_iso2022jp_as_cp932(b"\x1b$B\x29\x21\x1b(B")
