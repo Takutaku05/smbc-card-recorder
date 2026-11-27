@@ -31,7 +31,21 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOKEN_FILE = os.path.join(BASE_DIR, "config", "gmailtoken.json")
 LAST_RUN_FILE = os.path.join(BASE_DIR, "config", "last_run_time.json")
 PROCESSED_IDS_FILE = os.path.join(BASE_DIR, "config", "processed_message_ids.json")
-SERVICE_ACCOUNT_FILE = os.getenv("SERVICE_ACCOUNT_FILE")
+def _resolve_config_path(file_path):
+    """
+    設定ファイルパスが相対パスの場合、プロジェクトルート (BASE_DIR) 基準に解決する。
+
+    :param file_path: 環境変数等で指定されたファイルパス
+    :type file_path: str | None
+    :return: 解決済みパス（未指定時は None）
+    :rtype: str | None
+    """
+    if file_path and not os.path.isabs(file_path):
+        return os.path.join(BASE_DIR, file_path)
+    return file_path
+
+
+SERVICE_ACCOUNT_FILE = _resolve_config_path(os.getenv("SERVICE_ACCOUNT_FILE"))
 SCOPES_SHEET = ['https://www.googleapis.com/auth/spreadsheets']
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 
@@ -558,23 +572,36 @@ def initialize_services():
         logger.error("Gmail APIサービスへの接続中にエラーが発生しました: %s", error, exc_info=True)
         return False # 初期化失敗
 
-    # GSpread認証
+    # GSpread認証と必須設定の検証
     try:
         if not SERVICE_ACCOUNT_FILE:
             logger.error("環境変数 'SERVICE_ACCOUNT_FILE' が設定されていません。 .envファイルを確認してください。")
             return False
+        if not SPREADSHEET_ID:
+            logger.error("環境変数 'SPREADSHEET_ID' が設定されていません。 .envファイルを確認してください。")
+            return False
+        if not os.getenv("DISCORD_WEBHOOK_URL"):
+            logger.warning("環境変数 'DISCORD_WEBHOOK_URL' が設定されていません。Discord通知は無効の状態で稼働します。")
+
         sa_kwargs = {"filename": SERVICE_ACCOUNT_FILE, "scopes": SCOPES_SHEET}
         backoff_client = getattr(gspread, "BackOffHTTPClient", None)
         if backoff_client is not None:
             sa_kwargs["http_client"] = backoff_client
         gc = gspread.service_account(**sa_kwargs)
-        _cached_gc = None
-        _cached_spreadsheet_id = None
-        _cached_spreadsheet = None
+        spreadsheet = gc.open_by_key(SPREADSHEET_ID)
+        _cached_gc = gc
+        _cached_spreadsheet_id = SPREADSHEET_ID
+        _cached_spreadsheet = spreadsheet
         _worksheet_cache = {}
         logger.info("Google スプレッドシートAPIに接続しました。")
     except FileNotFoundError:
         logger.error("サービスアカウントファイル '%s' が見つかりません。 (.envファイルを確認してください)", SERVICE_ACCOUNT_FILE)
+        return False
+    except gspread.exceptions.SpreadsheetNotFound:
+        logger.error("スプレッドシートが見つかりません。SPREADSHEET_ID が正しいか確認してください。")
+        mailDisco.MailDisco(
+            "❌ 起動エラー: スプレッドシートが見つかりません。SPREADSHEET_ID と共有設定を確認してください。"
+        ).send()
         return False
     except Exception as e:
         logger.error("Google スプレッドシートAPIの認証エラー: %s", e, exc_info=True)
