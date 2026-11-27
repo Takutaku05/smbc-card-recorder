@@ -309,6 +309,7 @@ def sheet(email_time, location, money):
 
     try:
         spreadsheet = gc.open_by_key(SPREADSHEET_ID)
+        is_complete_data = False
         if email_time == "N/A":
             logger.warning("利用日が抽出できませんでした。")
             mailDisco.MailDisco("⚠️ 利用日が抽出できませんでした。").send()
@@ -323,8 +324,11 @@ def sheet(email_time, location, money):
             sheet_name = "Sheet1"
         else:
             sheet_name = timesheet(email_time)
-            mailDisco.MailDisco(f"【正常に書き込みました】\n利用先: {location}").send()
-        
+            is_complete_data = True
+
+        actual_sheet_name = sheet_name
+        used_fallback_sheet = False
+
         try:
             worksheet = spreadsheet.worksheet(sheet_name)
         except gspread.exceptions.WorksheetNotFound:
@@ -332,18 +336,30 @@ def sheet(email_time, location, money):
             try:
                 logger.info("フォールバックとして 'Sheet1' への書き込みを試みます。")
                 worksheet = spreadsheet.worksheet("Sheet1")
-                mailDisco.MailDisco(f"⚠️ ワークシート '{sheet_name}' が見つからず、 'Sheet1' に書き込みました。").send()
+                actual_sheet_name = "Sheet1"
+                used_fallback_sheet = True
             except gspread.exceptions.WorksheetNotFound:
                 logger.error("ワークシート 'Sheet1' も見つかりません。書き込みを中止します。")
+                mailDisco.MailDisco(
+                    f"❌ ワークシート '{sheet_name}' も 'Sheet1' も見つからず、利用先: {location} / 金額: {money} を記録できませんでした。"
+                ).send()
                 return False
 
-        
+        def _notify_write_success(written_pos):
+            if used_fallback_sheet:
+                mailDisco.MailDisco(
+                    f"⚠️ ワークシート '{sheet_name}' が見つからず、'Sheet1' ({written_pos}) に書き込みました。\n利用先: {location} / 金額: {money}"
+                ).send()
+            elif is_complete_data:
+                mailDisco.MailDisco(
+                    f"【正常に書き込みました】\nシート: {actual_sheet_name} ({written_pos})\n利用先: {location}\n金額: {money}"
+                ).send()
+
         purpose_instance = purpose.Purpose(location)
         judged_purpose = purpose_instance.judge()
 
         # 常に4要素[日時, 場所, 金額, 用途]
         data_to_log = [email_time, location, money, judged_purpose]
-        
 
         all_values = []
         try:
@@ -352,12 +368,14 @@ def sheet(email_time, location, money):
             logger.warning("ワークシートの値の取得に失敗しました: %s。末尾に追加を試みます。", e_get_values)
             worksheet.append_row(data_to_log)
             logger.info("ワークシートの値取得に失敗したため、最終行にデータ '%s' が追加されました。", data_to_log)
+            _notify_write_success("最終行")
             return True
 
         target_row_index = -1
         if not all_values: # シートが完全に空の場合
             worksheet.append_row(data_to_log)
             logger.info("シートが空だったため、1行目にデータ '%s' が追加されました。", data_to_log)
+            _notify_write_success("1行目")
             return True
         
         # 3行目(index 2)以降でA列が空の行を探すロジック
@@ -369,18 +387,26 @@ def sheet(email_time, location, money):
         if target_row_index == -1: # A列が空の行で見つからなかった場合
             worksheet.append_row(data_to_log)
             logger.info("A列が空の行が見つからなかったため、最終行にデータ '%s' が追加されました。", data_to_log)
+            _notify_write_success("最終行")
             return True
         else:
             range_to_update = f"A{target_row_index}:D{target_row_index}"
             worksheet.update(values=[data_to_log], range_name=range_to_update)
             logger.info("%d行目 (%s) にデータ '%s' が追加されました。", target_row_index, range_to_update, data_to_log)
+            _notify_write_success(f"{target_row_index}行目")
             return True
 
     except gspread.exceptions.SpreadsheetNotFound:
         logger.error("スプレッドシートが見つかりません。IDが正しいか確認してください: %s", SPREADSHEET_ID)
+        mailDisco.MailDisco(
+            f"❌ スプレッドシートが見つからず、利用先: {location} / 金額: {money} を記録できませんでした。SPREADSHEET_IDを確認してください。"
+        ).send()
         return False
     except Exception as e:
         logger.error("スプレッドシートへの書き込み中に予期せぬエラーが発生しました: %s", e, exc_info=True)
+        mailDisco.MailDisco(
+            f"❌ スプレッドシートへの書き込みに失敗しました。\n利用先: {location} / 金額: {money}\nエラー: {e}"
+        ).send()
         return False
 
 def timesheet(time):
