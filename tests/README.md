@@ -1,14 +1,17 @@
 # テスト
 
 main の現行挙動を固定する回帰テストです。外部サービス（Gmail / Google Sheets / Discord）は全てモックし、
-状態ファイルは `tmp_path` に隔離されるため、本番の `config/` や認証情報には触れません（`conftest.py`）。
+状態ファイルは `tmp_path` に隔離され、ログは `logs/` に書き込まず、`.env` の `DISCORD_WEBHOOK_URL` も無効化されるため、本番の `config/`・`logs/`・認証情報には触れません（`conftest.py`）。
 
 ```bash
+.venv/bin/pip install -r requirements-dev.txt     # pytest / pytest-cov の導入
 .venv/bin/python -m pytest                       # 全テスト
 .venv/bin/python -m pytest --cov=src --cov-branch  # カバレッジ（行・分岐とも100%）
 .venv/bin/python -m pytest -m known_issue        # 既知不具合の現行挙動だけ
 .venv/bin/python -m pytest -m "not known_issue"  # 既知不具合の固定テストを除外
 ```
+
+PR と `main` / `develop` への push では `.github/workflows/tests.yml` が Python 3.11 / 3.12 で同じテストを実行します（カバレッジ100%未満で失敗）。
 
 ## ファイル構成
 

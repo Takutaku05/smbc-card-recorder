@@ -8,7 +8,7 @@ from googleapiclient.errors import HttpError
 
 import src.mailSystem as mailSystem
 import src.purpose as purpose_module
-from tests.conftest import encode_b64url
+from tests.conftest import encode_b64url, run_main_block
 
 
 def _make_http_error(status: int = 500, reason: str = "Server Error") -> HttpError:
@@ -398,78 +398,31 @@ class TestEndToEndFlow:
 
 class TestMainEntrypoint:
     def test_main_block_success_registers_schedule_and_handles_keyboard_interrupt(self):
-        import io
-        import os
-        import runpy
         import schedule as schedule_mod
 
-        real_open = open
-        real_exists = os.path.exists
-
-        def _safe_open(file, mode="r", *args, **kwargs):
-            if "w" in mode:
-                return io.StringIO()
-            return real_open(file, mode, *args, **kwargs)
-
-        def _safe_exists(path):
-            if str(path).endswith((".json",)):
-                return False
-            return real_exists(path)
-
         schedule_mod.clear()
-        mock_disco_instance = MagicMock()
-        mock_gmail = MagicMock()
-        mock_gmail.users().messages().list().execute.return_value = {"messages": []}
         try:
-            with patch("dotenv.load_dotenv"), \
-                 patch("src.mailDisco.MailDisco", return_value=mock_disco_instance) as mock_disco_cls, \
-                 patch("google_auth_oauthlib.flow.InstalledAppFlow.from_client_secrets_file") as mock_flow_cls, \
-                 patch("googleapiclient.discovery.build", return_value=mock_gmail), \
-                 patch("gspread.service_account", return_value=MagicMock()), \
-                 patch("os.path.exists", side_effect=_safe_exists), \
-                 patch("builtins.open", side_effect=_safe_open), \
-                 patch("os.getenv", side_effect=lambda k, d=None: "dummy" if k in ("SERVICE_ACCOUNT_FILE", "SPREADSHEET_ID") else d), \
-                 patch("time.sleep", side_effect=[None, KeyboardInterrupt]):
-                mock_creds = MagicMock(valid=True)
-                mock_creds.to_json.return_value = "{}"
-                mock_flow_cls.return_value.run_local_server.return_value = mock_creds
-
-                runpy.run_path(mailSystem.__file__, run_name="__main__")
+            result = run_main_block()
 
             # :00 と :30 の2つのジョブが登録されていること
             assert len(schedule_mod.jobs) == 2
             at_times = sorted(str(j.at_time) for j in schedule_mod.jobs)
             assert at_times == ["00:00:00", "00:30:00"]
 
-            messages = [c.args[0] for c in mock_disco_cls.call_args_list]
+            messages = result["disco_messages"]
             assert any("起動しました" in m for m in messages)
             assert any("停止しました" in m for m in messages)
         finally:
             schedule_mod.clear()
 
     def test_main_block_failure_notifies_and_exits_without_scheduling(self):
-        import os
-        import runpy
         import schedule as schedule_mod
 
-        real_exists = os.path.exists
-
-        def _safe_exists(path):
-            if str(path).endswith((".json",)):
-                return False
-            return real_exists(path)
-
         schedule_mod.clear()
-        mock_disco_instance = MagicMock()
         try:
-            with patch("dotenv.load_dotenv"), \
-                 patch("src.mailDisco.MailDisco", return_value=mock_disco_instance) as mock_disco_cls, \
-                 patch("os.path.exists", side_effect=_safe_exists), \
-                 patch("google_auth_oauthlib.flow.InstalledAppFlow.from_client_secrets_file", side_effect=FileNotFoundError):
-                runpy.run_path(mailSystem.__file__, run_name="__main__")
+            result = run_main_block(init_ok=False)
 
             assert len(schedule_mod.jobs) == 0
-            messages = [c.args[0] for c in mock_disco_cls.call_args_list]
-            assert any("サービスの初期化に失敗しました" in m for m in messages)
+            assert any("サービスの初期化に失敗しました" in m for m in result["disco_messages"])
         finally:
             schedule_mod.clear()

@@ -26,6 +26,11 @@ SRC_FILES = [
 ]
 
 
+def _getenv_names(source):
+    """ソース中の os.getenv(...) が読む環境変数名を、クォート種別・空白を問わず抽出する。"""
+    return set(re.findall(r"""os\.getenv\(\s*["']([A-Z_]+)["']""", source))
+
+
 class TestModuleConstants:
     def test_gmail_scope_is_readonly(self):
         # 読み取り専用スコープであること（誤って modify/send 権限を要求しない）
@@ -40,29 +45,28 @@ class TestModuleConstants:
         ]
 
     def test_base_dir_is_repository_root(self):
-        assert Path(mailSystem.BASE_DIR) == REPO_ROOT
+        assert Path(mailSystem.BASE_DIR).resolve() == REPO_ROOT
 
     def test_state_file_paths_are_under_config_dir(self):
         """conftest が差し替える前の本来のパスを、ソースから再計算して検証する。"""
         source = (REPO_ROOT / "src/mailSystem.py").read_text(encoding="utf-8")
-        assert (
-            'TOKEN_FILE = os.path.join(BASE_DIR, "config", "gmailtoken.json")' in source
-        )
-        assert (
-            'LAST_RUN_FILE = os.path.join(BASE_DIR, "config", "last_run_time.json")'
-            in source
-        )
-        assert (
-            'PROCESSED_IDS_FILE = os.path.join(BASE_DIR, "config", "processed_message_ids.json")'
-            in source
-        )
+        for const, filename in [
+            ("TOKEN_FILE", "gmailtoken.json"),
+            ("LAST_RUN_FILE", "last_run_time.json"),
+            ("PROCESSED_IDS_FILE", "processed_message_ids.json"),
+        ]:
+            # フォーマッタによる改行・空白・クォート種別の変更には影響されないようにする
+            pattern = (
+                rf"{const}\s*=\s*os\.path\.join\(\s*BASE_DIR\s*,\s*"
+                rf"[\"']config[\"']\s*,\s*[\"']{re.escape(filename)}[\"']\s*,?\s*\)"
+            )
+            assert re.search(pattern, source), const
 
     def test_env_driven_settings_read_expected_variable_names(self):
         source = (REPO_ROOT / "src/mailSystem.py").read_text(encoding="utf-8")
-        assert 'os.getenv("SERVICE_ACCOUNT_FILE")' in source
-        assert 'os.getenv("SPREADSHEET_ID")' in source
+        assert _getenv_names(source) == {"SERVICE_ACCOUNT_FILE", "SPREADSHEET_ID"}
         disco_source = (REPO_ROOT / "src/mailDisco.py").read_text(encoding="utf-8")
-        assert 'os.getenv("DISCORD_WEBHOOK_URL")' in disco_source
+        assert _getenv_names(disco_source) == {"DISCORD_WEBHOOK_URL"}
 
     def test_global_state_initial_types(self):
         # conftest によるリセット後の型（本番起動時と同じ初期状態）
@@ -105,12 +109,7 @@ class TestEnvExample:
 
         used = set()
         for rel in SRC_FILES:
-            used |= set(
-                re.findall(
-                    r'os\.getenv\("([A-Z_]+)"',
-                    (REPO_ROOT / rel).read_text(encoding="utf-8"),
-                )
-            )
+            used |= _getenv_names((REPO_ROOT / rel).read_text(encoding="utf-8"))
 
         assert used == {"SERVICE_ACCOUNT_FILE", "SPREADSHEET_ID", "DISCORD_WEBHOOK_URL"}
         assert used <= env_keys

@@ -369,12 +369,12 @@ def test_issue29_bom_in_categories_csv_breaks_first_store(monkeypatch, tmp_path)
         purpose_module, "__file__", str(tmp_path / "src" / "purpose.py")
     )
     assert Purpose("スーパーA").judge() is None
-    assert Purpose("﻿スーパーA").judge() == "食費"
+    assert Purpose("\ufeffスーパーA").judge() == "食費"
     assert Purpose("スーパーB").judge() == "食費"
 
 
 @pytest.mark.known_issue(29)
-def test_issue29_classification_failure_is_not_notified(caplog):
+def test_issue29_classification_failure_is_not_notified():
     ws = MagicMock()
     ws.get_all_values.return_value = []
     mailSystem.gc, _ = _gc_with({"11月": ws})

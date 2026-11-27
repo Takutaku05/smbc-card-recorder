@@ -28,22 +28,12 @@ class TestDecodeBase64UrlSafe:
         encoded = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
         assert mailSystem.decode_base64_url_safe(encoded) == ">>??日本語テスト??<<"
 
-    def test_decode_iso_2022_jp_fallback(self):
-        # UTF-8 として不正だが iso-2022-jp として妥当なバイト列（エスケープシーケンス含む日本語）
-        text = "三井住友カードご利用のお知らせ：１，０００円"
-        raw_bytes = text.encode("iso-2022-jp")
-        # 念のため UTF-8 デコードが失敗するか確認（iso-2022-jpは7bit ASCII範囲のためUTF-8でも通る場合がある）
-        # ESC $ B は ASCII 範囲なので UTF-8 でも通ってしまう点に注意。
-        # 非UTF-8バイト列（例: \x80 を含まない iso-2022-jp vs 実際に UTF-8 失敗するケース）を明示的に確認する。
-        encoded = base64.urlsafe_b64encode(raw_bytes).decode("ascii")
-        decoded = mailSystem.decode_base64_url_safe(encoded)
-        assert isinstance(decoded, str)
+    # ISO-2022-JP 本文は 7bit のため UTF-8 デコードがそのまま成功してしまう現行挙動は
+    # test_known_issues.py::test_issue19_iso_2022_jp_body_decodes_via_utf8_path で、
+    # UTF-8 失敗時に iso-2022-jp で再試行する経路は test_mail_system_parsing_extra.py で検証している。
 
-    def test_decode_falls_back_to_iso_2022_jp_on_utf8_error(self, monkeypatch):
-        """UTF-8 デコードが UnicodeDecodeError を投げた場合、iso-2022-jp で再試行する。"""
-        # 0x80 は UTF-8 でも iso-2022-jp でも失敗するので、bytes.decode を模倣せず
-        # iso-2022-jp でデコード可能かつ UTF-8 で失敗する実ケースはないため、
-        # デコード不能バイト列で UnicodeDecodeError が送出されることも合わせて検証
+    def test_decode_bytes_invalid_in_both_encodings_raises_unicode_decode_error(self):
+        """UTF-8 でも iso-2022-jp でもデコードできないバイト列は UnicodeDecodeError を送出する。"""
         invalid_bytes = b"\xff\xfe\xfd"
         encoded = base64.urlsafe_b64encode(invalid_bytes).decode("ascii")
         with pytest.raises(UnicodeDecodeError):

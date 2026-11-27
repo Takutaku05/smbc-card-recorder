@@ -1,4 +1,3 @@
-import datetime
 import logging
 from unittest.mock import MagicMock, patch
 
@@ -146,8 +145,8 @@ class TestSheetWriting:
         ws.append_row.assert_called_once_with(["2026/11/05 12:00", "スーパーA", 1000, "食費"])
         assert "ワークシートの値の取得に失敗しました" in caplog.text
 
-    def test_na_email_time_notifies_and_uses_current_month_sheet(self):
-        current_month_sheet = f"{datetime.datetime.now().month}月"
+    def test_na_email_time_notifies_and_uses_current_month_sheet(self, fixed_now):
+        current_month_sheet = f"{fixed_now.month}月"
         ws = MagicMock()
         ws.get_all_values.return_value = []
         gc, spreadsheet = _make_mock_gc({current_month_sheet: ws})
@@ -192,9 +191,9 @@ class TestSheetWriting:
         mock_disco_cls.assert_called_once_with("⚠️ 利用金額が抽出できませんでした。")
         ws.append_row.assert_called_once_with(["2026/11/05 12:00", "レストランA", "N/A", "外食費"])
 
-    def test_na_priority_when_multiple_fields_missing(self):
+    def test_na_priority_when_multiple_fields_missing(self, fixed_now):
         """現行mainの仕様: elifチェーンにより email_time -> location -> money の順で判定される。"""
-        current_month_sheet = f"{datetime.datetime.now().month}月"
+        current_month_sheet = f"{fixed_now.month}月"
         ws = MagicMock()
         ws.get_all_values.return_value = []
         gc, _ = _make_mock_gc({current_month_sheet: ws})

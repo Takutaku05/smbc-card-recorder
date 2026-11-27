@@ -16,7 +16,7 @@ from google.auth.transport.requests import Request
 from googleapiclient.errors import HttpError
 
 import src.mailSystem as mailSystem
-from tests.conftest import encode_b64url
+from tests.conftest import FixedDateTime, encode_b64url
 
 LOGGER = "smbc_card_recorder.src.mailSystem"
 QUERY = 'in:inbox subject:"ご利用のお知らせ【三井住友カード】"'
@@ -63,14 +63,6 @@ def _gmail(message_ids, details=None):
 
 def _error_records(caplog):
     return [r for r in caplog.records if r.levelno >= logging.ERROR]
-
-
-class FixedDateTime(datetime.datetime):
-    fixed_now = datetime.datetime(2026, 11, 27, 9, 30, 0)
-
-    @classmethod
-    def now(cls, tz=None):
-        return cls.fixed_now
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +129,9 @@ class TestInitializeServicesExtra:
         ) == '{"keep": 1}'
         assert mailSystem.gmail_service is None and mailSystem.gc is None
         # スタックトレース付きでログされ、再認証手順も案内される
-        assert _error_records(caplog)[0].exc_info and _error_records(caplog)[0].exc_info[0] is not None
+        errors = _error_records(caplog)
+        assert errors, "ERROR ログが出力されていない"
+        assert errors[0].exc_info and errors[0].exc_info[0] is not None
         assert "gmailtoken.json' を削除して再認証してください" in caplog.text
 
     @pytest.mark.parametrize(
@@ -248,7 +242,9 @@ class TestInitializeServicesExtra:
             assert mailSystem.initialize_services() is False
         mock_sa.assert_not_called()
         assert mailSystem.gmail_service is None
-        assert _error_records(caplog)[0].exc_info and _error_records(caplog)[0].exc_info[0] is not None
+        errors = _error_records(caplog)
+        assert errors, "ERROR ログが出力されていない"
+        assert errors[0].exc_info and errors[0].exc_info[0] is not None
 
     def test_missing_service_account_env_does_not_call_gspread(
         self, tmp_path, monkeypatch
@@ -287,7 +283,9 @@ class TestInitializeServicesExtra:
             assert mailSystem.initialize_services() is False
         assert mailSystem.gmail_service is gmail
         assert mailSystem.gc is None
-        assert _error_records(caplog)[0].exc_info and _error_records(caplog)[0].exc_info[0] is not None
+        errors = _error_records(caplog)
+        assert errors, "ERROR ログが出力されていない"
+        assert errors[0].exc_info and errors[0].exc_info[0] is not None
         assert "編集者権限" in caplog.text
 
     def test_success_logs_start_and_completion(self, tmp_path, caplog):

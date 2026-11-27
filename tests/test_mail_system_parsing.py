@@ -1,4 +1,3 @@
-import datetime
 import logging
 from unittest.mock import patch
 
@@ -36,8 +35,8 @@ class TestTimesheet:
             "invalid",
         ],
     )
-    def test_timesheet_invalid_format_falls_back_to_current_month(self, invalid_time, caplog):
-        expected_month = f"{datetime.datetime.now().month}月"
+    def test_timesheet_invalid_format_falls_back_to_current_month(self, invalid_time, caplog, fixed_now):
+        expected_month = f"{fixed_now.month}月"
 
         with caplog.at_level(logging.WARNING, logger="smbc_card_recorder.src.mailSystem"):
             result = mailSystem.timesheet(invalid_time)

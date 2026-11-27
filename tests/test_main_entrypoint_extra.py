@@ -5,16 +5,13 @@
 スケジュール登録・初回実行・メインループ・停止通知を検証する。
 """
 
-import io
 import json
-import os
-import runpy
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 import schedule as schedule_mod
 
-import src.mailSystem as mailSystem
+from tests.conftest import run_main_block as _run_main
 
 
 @pytest.fixture(autouse=True)
@@ -22,92 +19,6 @@ def _clear_schedule():
     schedule_mod.clear()
     yield
     schedule_mod.clear()
-
-
-def _run_main(
-    *,
-    json_files=None,
-    init_ok=True,
-    sleep_effects=(None, KeyboardInterrupt),
-    gmail=None,
-):
-    """
-    __main__ ブロックを安全に実行するヘルパー。
-
-    :param json_files: {ファイル名: 内容(str)}。存在するものとして読み込ませる state ファイル
-    :return: 検証用モックをまとめた dict
-    """
-    json_files = json_files or {}
-    real_open = open
-    real_exists = os.path.exists
-    events = []
-
-    def _exists(path):
-        name = os.path.basename(str(path))
-        if name.endswith(".json"):
-            return name in json_files
-        return real_exists(path)
-
-    def _open(file, mode="r", *args, **kwargs):
-        name = os.path.basename(str(file))
-        if "w" in mode:
-            events.append(("write", name))
-            return io.StringIO()
-        if name in json_files:
-            events.append(("read", name))
-            return io.StringIO(json_files[name])
-        return real_open(file, mode, *args, **kwargs)
-
-    if gmail is None:
-        gmail = MagicMock()
-        gmail.users().messages().list().execute.return_value = {"messages": []}
-
-    disco_cls = MagicMock()
-    creds = MagicMock(valid=True)
-    creds.to_json.return_value = "{}"
-    flow = MagicMock()
-    flow.run_local_server.return_value = creds
-
-    def _flow_factory(*a, **k):
-        events.append(("oauth", None))
-        if not init_ok:
-            raise FileNotFoundError
-        return flow
-
-    with (
-        patch("dotenv.load_dotenv") as load_dotenv,
-        patch("src.mailDisco.MailDisco", disco_cls),
-        patch(
-            "google_auth_oauthlib.flow.InstalledAppFlow.from_client_secrets_file",
-            side_effect=_flow_factory,
-        ),
-        patch("googleapiclient.discovery.build", return_value=gmail),
-        patch("gspread.service_account", return_value=MagicMock()),
-        patch("os.path.exists", side_effect=_exists),
-        patch("builtins.open", side_effect=_open),
-        patch(
-            "os.getenv",
-            side_effect=lambda k, d=None: (
-                "dummy" if k in ("SERVICE_ACCOUNT_FILE", "SPREADSHEET_ID") else d
-            ),
-        ),
-        patch(
-            "schedule.run_pending",
-            side_effect=lambda: events.append(("run_pending", None)),
-        ) as run_pending,
-        patch("time.sleep", side_effect=list(sleep_effects)) as sleep,
-    ):
-        runpy.run_path(mailSystem.__file__, run_name="__main__")
-
-    return {
-        "events": events,
-        "disco_messages": [c.args[0] for c in disco_cls.call_args_list],
-        "disco_cls": disco_cls,
-        "load_dotenv": load_dotenv,
-        "run_pending": run_pending,
-        "sleep": sleep,
-        "gmail": gmail,
-    }
 
 
 class TestMainEntrypointExtra:
