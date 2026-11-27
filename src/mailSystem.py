@@ -3,6 +3,7 @@ import time
 import datetime
 import json
 import base64
+import html
 import re
 from dotenv import load_dotenv
 
@@ -41,49 +42,157 @@ processed_ids = set()
 gmail_service = None
 
 
-def decode_base64_url_safe(data):
+def _extract_charset(part):
+    """
+    Gmail APIパートの Content-Type ヘッダから文字セット名を取得する。
+
+    :param part: Gmail APIメッセージパート辞書
+    :type part: dict
+    :return: 小文字の文字セット名。指定がない場合は None
+    :rtype: str | None
+    """
+    for header in part.get("headers", []):
+        if header.get("name", "").lower() == "content-type":
+            match = re.search(r'charset\s*=\s*"?([^";\s]+)"?', header.get("value", ""), re.IGNORECASE)
+            if match:
+                return match.group(1).strip().lower()
+    return None
+
+
+def decode_base64_url_safe(data, charset=None):
     """
     URLセーフなBase64エンコードデータをデコードする。
 
-    パディング（=）の調整を行い、UTF-8でのデコードを試みる。
-    失敗した場合は iso-2022-jp（日本のメールで一般的）でのデコードを試行する。
+    パディング（=）の調整を行い、指定charset・ESCシーケンス判定（iso-2022-jp）・
+    各種日本語文字コード（utf-8 / iso-2022-jp / cp932 / euc_jp）の順にデコードを試みる。
 
     :param data: Base64エンコードされた文字列
     :type data: str
+    :param charset: Content-Type ヘッダ等から取得した優先文字セット
+    :type charset: str | None
     :return: デコードされた文字列
     :rtype: str
+    :raises UnicodeDecodeError: すべての候補文字コードでデコードに失敗した場合
     """
     decoded_bytes = base64.urlsafe_b64decode(data + '=' * ((-len(data)) % 4))
-    try:
-        # まずUTF-8で実行
-        return decoded_bytes.decode('utf-8')
-    except UnicodeDecodeError:
-        # UTF-8で失敗した場合、iso-2022-jpで実行
-        return decoded_bytes.decode('iso-2022-jp')
+
+    candidates = []
+    if charset:
+        candidates.append(charset)
+    # ISO-2022-JP は7bit文字コードのため、UTF-8より先にESCバイト有無で判定する
+    if b"\x1b" in decoded_bytes:
+        candidates.append("iso-2022-jp")
+    candidates.extend(["utf-8", "iso-2022-jp", "euc_jp", "cp932"])
+
+    tried = set()
+    last_error = None
+    for encoding in candidates:
+        key = encoding.lower()
+        if key in tried:
+            continue
+        tried.add(key)
+        try:
+            return decoded_bytes.decode(encoding)
+        except (LookupError, UnicodeDecodeError) as err:
+            if isinstance(err, UnicodeDecodeError):
+                last_error = err
+
+    if last_error is not None:
+        raise last_error
+    raise UnicodeDecodeError("utf-8", decoded_bytes, 0, len(decoded_bytes), "failed to decode email body")
+
+
+def _html_to_text(html_body):
+    """
+    HTML文字列からスクリプト・スタイル・タグを除去し、テキストへ変換する。
+
+    :param html_body: HTML本文
+    :type html_body: str
+    :return: プレーンテキスト化された文字列
+    :rtype: str
+    """
+    text = re.sub(r"<style\b[^>]*>.*?</style>", "", html_body, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<script\b[^>]*>.*?</script>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<br\s*/?>|</tr>|</p>|</div>|</li>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"</t[dh]>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", "", text)
+    return html.unescape(text)
+
+
+def _summarize_mime_tree(payload):
+    """
+    デバッグログ向けにペイロードの MIME 構造を要約する（本文内容は含めない）。
+
+    :param payload: Gmail APIメッセージペイロード辞書
+    :type payload: dict
+    :return: MIME階層の文字列表現
+    :rtype: str
+    """
+    mime_type = payload.get("mimeType") or "unknown"
+    parts = payload.get("parts")
+    if parts:
+        children = ", ".join(_summarize_mime_tree(part) for part in parts)
+        return f"{mime_type}[{children}]"
+    return mime_type
+
+
+def _extract_body_parts(payload):
+    """
+    Gmail APIのペイロード構造を再帰的に探索し、(text/plain, text/html) を返す。
+
+    :param payload: Gmail APIから取得したメッセージのペイロード辞書
+    :type payload: dict
+    :return: (プレーンテキスト本文, HTML本文) のタプル
+    :rtype: tuple[str, str]
+    """
+    parts = payload.get("parts")
+    if parts:
+        first_html = ""
+        for part in parts:
+            plain_body, html_body = _extract_body_parts(part)
+            if plain_body:
+                return plain_body, ""
+            if html_body and not first_html:
+                first_html = html_body
+        return "", first_html
+
+    if payload.get("filename"):
+        return "", ""
+
+    data = payload.get("body", {}).get("data")
+    if not data:
+        return "", ""
+
+    mime_type = (payload.get("mimeType") or "").lower()
+    if mime_type and not mime_type.startswith("text/"):
+        return "", ""
+
+    decoded = decode_base64_url_safe(data, charset=_extract_charset(payload))
+    if mime_type == "text/html":
+        return "", decoded
+    return decoded, ""
+
 
 def get_email_body(msg_payload):
     """
     Gmail APIのペイロード構造からメール本文（プレーンテキストまたはHTML）を抽出・デコードする。
+
+    ネストされた multipart 構造を再帰的に探索し、``text/plain`` を優先、
+    存在しない場合は ``text/html`` をテキスト化して返す。
 
     :param msg_payload: Gmail APIから取得したメッセージのペイロード辞書
     :type msg_payload: dict
     :return: デコードされたメール本文。抽出できない場合は空文字を返す。
     :rtype: str
     """
-    body_data = ""
-    if "parts" in msg_payload:
-        for part in msg_payload["parts"]:
-            mime_type = part.get("mimeType")
-            if mime_type == "text/plain":
-                if "body" in part and "data" in part["body"]:
-                    return decode_base64_url_safe(part["body"]["data"])
-            elif mime_type == "text/html":
-                if "body" in part and "data" in part["body"]:
-                    html_body = decode_base64_url_safe(part["body"]["data"])
-                    body_data = html_body
-    elif "body" in msg_payload and "data" in msg_payload["body"]:
-        body_data = decode_base64_url_safe(msg_payload["body"]["data"])
-    return body_data
+    plain_body, html_body = _extract_body_parts(msg_payload)
+    if plain_body:
+        return plain_body
+    if html_body:
+        return _html_to_text(html_body)
+
+    logger.warning("本文パートを抽出できませんでした。MIME構造: %s", _summarize_mime_tree(msg_payload))
+    return ""
 
 def get_last_run_time():
     """
