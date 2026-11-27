@@ -544,6 +544,8 @@ def check_mail_job():
         )
         messages = results.get("messages", [])
 
+        had_failure = False
+
         if not messages:
             logger.info("新しい対象メールは見つかりませんでした。")
         else:
@@ -581,27 +583,40 @@ def check_mail_job():
                             new_messages_processed_count += 1
                             logger.info("メールID %s の処理が完了し、処理済みとしてマークしました。", message_id)
                         else:
+                            had_failure = True
                             logger.error("メールID %s のスプレッドシート書き込みに失敗したため、処理済みに登録しません。", message_id)
                             mailDisco.MailDisco(
                                 f"❌ メールID {message_id} のスプレッドシート書き込みに失敗しました。処理済みには登録せずスキップします。"
                             ).send()
                     else:
+                        had_failure = True
                         logger.warning("メールID %s の本文が見つかりませんでした。処理済みに登録せずスキップします。", message_id)
                         mailDisco.MailDisco(
                             f"⚠️ メールID {message_id} の本文を取得できなかったためスキップしました（処理済み未登録）。"
                         ).send()
                 
                 except HttpError as e_msg_get:
+                    had_failure = True
                     logger.error("メールID %s の詳細取得中にエラー: %s", message_id, e_msg_get)
+                    mailDisco.MailDisco(
+                        f"❌ メールID {message_id} の取得中にエラーが発生しました。次回再試行するため最終チェック時刻を更新しません。"
+                    ).send()
                 except Exception as e_proc:
+                    had_failure = True
                     logger.error("メールID %s の処理中に予期せぬエラー: %s", message_id, e_proc, exc_info=True)
+                    mailDisco.MailDisco(
+                        f"❌ メールID {message_id} の処理中に予期せぬエラーが発生しました。次回再試行するため最終チェック時刻を更新しません。"
+                    ).send()
 
             if new_messages_processed_count > 0:
                  logger.info("%d 件の新しいメールの処理が完了しました。", new_messages_processed_count)
             else:
                  logger.info("新しい未処理メールはありませんでした（処理済みを除く）。")
         
-        save_current_run_time(current_check_time)
+        if not had_failure:
+            save_current_run_time(current_check_time)
+        else:
+            logger.warning("処理に失敗したメールがあるため、last_run_time を更新せず次回再試行します。")
         save_processed_ids()
 
     except HttpError as error:
