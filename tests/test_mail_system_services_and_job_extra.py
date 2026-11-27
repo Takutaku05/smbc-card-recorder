@@ -1,14 +1,11 @@
 """
-initialize_services() / check_mail_job() の追加回帰テスト。
-
-ミューテーションテストで「コードを壊してもテストが通ってしまった」箇所
-（API呼び出し引数、リトライ回数、早期return、状態保存のタイミング、運用ログ）を固定する。
+initialize_services() / check_mail_job() / 内部ヘルパーの追加回帰テスト。
 """
 
 import datetime
 import json
 import logging
-import types
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -16,10 +13,10 @@ from google.auth.transport.requests import Request
 from googleapiclient.errors import HttpError
 
 import src.mailSystem as mailSystem
-from tests.conftest import FixedDateTime, encode_b64url
+from tests.conftest import FixedDateTime, encode_b64url, make_fixed_datetime_namespace
 
 LOGGER = "smbc_card_recorder.src.mailSystem"
-QUERY = 'in:inbox subject:"ご利用のお知らせ【三井住友カード】"'
+QUERY = 'subject:"ご利用のお知らせ【三井住友カード】" -in:trash -in:spam'
 
 
 def _http_error(status=500):
@@ -46,7 +43,7 @@ def _gmail(message_ids, details=None):
     }
     details = details or {}
 
-    def _get(userId, id, format):  # Gmail API の引数名に合わせる
+    def _get(userId, id, format):
         req = MagicMock()
         value = details.get(id, _msg())
         if isinstance(value, Exception):
@@ -56,7 +53,6 @@ def _gmail(message_ids, details=None):
         return req
 
     gmail.users().messages().get.side_effect = _get
-    # 上の呼び出しで記録された call をリセットして、テスト本体の呼び出しだけを見る
     gmail.users().messages().list.reset_mock()
     return gmail
 
@@ -65,16 +61,14 @@ def _error_records(caplog):
     return [r for r in caplog.records if r.levelno >= logging.ERROR]
 
 
-# ---------------------------------------------------------------------------
-# initialize_services
-# ---------------------------------------------------------------------------
 class TestInitializeServicesExtra:
     def _token(self, tmp_path, text="{}"):
         (tmp_path / "gmailtoken.json").write_text(text, encoding="utf-8")
 
-    def test_valid_token_is_not_rewritten(self, tmp_path):
+    def test_valid_token_is_not_rewritten_and_initial_json_cached(self, tmp_path):
         self._token(tmp_path, '{"original": true}')
         creds = MagicMock(valid=True)
+        creds.to_json.return_value = '{"original": true}'
         with (
             patch(
                 "src.mailSystem.GmailCredentials.from_authorized_user_file",
@@ -84,11 +78,30 @@ class TestInitializeServicesExtra:
             patch("src.mailSystem.gspread.service_account"),
         ):
             assert mailSystem.initialize_services() is True
-        creds.to_json.assert_not_called()
         creds.refresh.assert_not_called()
+        assert mailSystem._last_saved_token_json == '{"original": true}'
         assert (tmp_path / "gmailtoken.json").read_text(
             encoding="utf-8"
         ) == '{"original": true}'
+
+    def test_valid_token_ignores_to_json_error_and_handles_webhook_or_no_backoff(
+        self, tmp_path, monkeypatch
+    ):
+        self._token(tmp_path)
+        creds = MagicMock(valid=True)
+        creds.to_json.side_effect = RuntimeError("cannot serialize")
+        monkeypatch.setenv("DISCORD_WEBHOOK_URL", "https://example.invalid/hook")
+        monkeypatch.setattr(mailSystem.gspread, "BackOffHTTPClient", None, raising=False)
+        with (
+            patch(
+                "src.mailSystem.GmailCredentials.from_authorized_user_file",
+                return_value=creds,
+            ),
+            patch("src.mailSystem.build"),
+            patch("src.mailSystem.gspread.service_account") as mock_sa,
+        ):
+            assert mailSystem.initialize_services() is True
+        assert "http_client" not in mock_sa.call_args.kwargs
 
     def test_refresh_is_called_with_google_request_object(self, tmp_path):
         self._token(tmp_path)
@@ -106,7 +119,7 @@ class TestInitializeServicesExtra:
         (arg,), _ = creds.refresh.call_args
         assert isinstance(arg, Request)
 
-    def test_refresh_failure_does_not_touch_token_or_build_services(
+    def test_refresh_failure_notifies_once_and_does_not_touch_token_or_build(
         self, tmp_path, caplog
     ):
         self._token(tmp_path, '{"keep": 1}')
@@ -119,34 +132,29 @@ class TestInitializeServicesExtra:
             ),
             patch("src.mailSystem.build") as mock_build,
             patch("src.mailSystem.gspread.service_account") as mock_sa,
+            patch("src.mailSystem.mailDisco.MailDisco") as mock_disco,
             caplog.at_level(logging.ERROR, logger=LOGGER),
         ):
             assert mailSystem.initialize_services() is False
+            # 2回目の失敗では重複通知を抑止する
+            assert mailSystem.initialize_services() is False
+        mock_disco.assert_called_once()
         mock_build.assert_not_called()
         mock_sa.assert_not_called()
         assert (tmp_path / "gmailtoken.json").read_text(
             encoding="utf-8"
         ) == '{"keep": 1}'
         assert mailSystem.gmail_service is None and mailSystem.gc is None
-        # スタックトレース付きでログされ、再認証手順も案内される
         errors = _error_records(caplog)
-        assert errors, "ERROR ログが出力されていない"
+        assert errors
         assert errors[0].exc_info and errors[0].exc_info[0] is not None
         assert "gmailtoken.json' を削除して再認証してください" in caplog.text
 
     @pytest.mark.parametrize(
         "creds_kwargs",
         [
-            {
-                "valid": False,
-                "expired": False,
-                "refresh_token": "r",
-            },  # 失効していないが無効（取り消し等）
-            {
-                "valid": False,
-                "expired": True,
-                "refresh_token": None,
-            },  # リフレッシュトークンなし
+            {"valid": False, "expired": False, "refresh_token": "r"},
+            {"valid": False, "expired": True, "refresh_token": None},
             {"valid": False, "expired": True, "refresh_token": ""},
         ],
     )
@@ -190,11 +198,7 @@ class TestInitializeServicesExtra:
             patch("src.mailSystem.gspread.service_account"),
         ):
             mailSystem.initialize_services()
-        expected_path = str(
-            __import__("pathlib").Path(mailSystem.BASE_DIR)
-            / "config"
-            / "credentials.json"
-        )
+        expected_path = str(Path(mailSystem.BASE_DIR) / "config" / "credentials.json")
         mock_from.assert_called_once_with(
             expected_path, ["https://www.googleapis.com/auth/gmail.readonly"]
         )
@@ -243,7 +247,7 @@ class TestInitializeServicesExtra:
         mock_sa.assert_not_called()
         assert mailSystem.gmail_service is None
         errors = _error_records(caplog)
-        assert errors, "ERROR ログが出力されていない"
+        assert errors
         assert errors[0].exc_info and errors[0].exc_info[0] is not None
 
     def test_missing_service_account_env_does_not_call_gspread(
@@ -284,7 +288,7 @@ class TestInitializeServicesExtra:
         assert mailSystem.gmail_service is gmail
         assert mailSystem.gc is None
         errors = _error_records(caplog)
-        assert errors, "ERROR ログが出力されていない"
+        assert errors
         assert errors[0].exc_info and errors[0].exc_info[0] is not None
         assert "編集者権限" in caplog.text
 
@@ -305,10 +309,55 @@ class TestInitializeServicesExtra:
         assert "Google スプレッドシートAPIに接続しました。" in caplog.text
         assert "--- サービス初期化完了 ---" in caplog.text
 
+    def test_token_atomic_helpers_and_persist_refreshed_token_error_branches(
+        self, monkeypatch, tmp_path, caplog
+    ):
+        monkeypatch.chdir(tmp_path)
+        # 親ディレクトリ無しの相対ファイル名で _write_token_atomic
+        mailSystem._write_token_atomic("bare_token.json", '{"ok": 1}')
+        assert (tmp_path / "bare_token.json").read_text(encoding="utf-8") == '{"ok": 1}'
 
-# ---------------------------------------------------------------------------
-# check_mail_job
-# ---------------------------------------------------------------------------
+        # os.replace 失敗時に .tmp を掃除して再送出
+        with (
+            patch("src.mailSystem.os.replace", side_effect=OSError("replace fail")),
+            pytest.raises(OSError),
+        ):
+            mailSystem._write_token_atomic(str(tmp_path / "fail_tok.json"), "{}")
+        assert not (tmp_path / "fail_tok.json.tmp").exists()
+
+        # os.fdopen 前に .tmp が既に消えていても例外ハンドラが安全に通る
+        with (
+            patch("src.mailSystem.os.fdopen", side_effect=OSError("fdopen fail")),
+            patch("src.mailSystem.os.path.exists", return_value=False),
+            pytest.raises(OSError),
+        ):
+            mailSystem._write_token_atomic(str(tmp_path / "fail_tok2.json"), "{}")
+
+        # _atomic_write_json で open 自体が失敗し .tmp が存在しない経路
+        with (
+            patch("builtins.open", side_effect=OSError("open fail")),
+            pytest.raises(OSError),
+        ):
+            mailSystem._atomic_write_json(str(tmp_path / "no_tmp.json"), {})
+
+        # _persist_refreshed_token_if_needed: to_json 例外経路 & _write_token_atomic OSError 経路
+        bad_creds = MagicMock()
+        bad_creds.to_json.side_effect = RuntimeError("bad json")
+        monkeypatch.setattr(mailSystem, "_gmail_creds", bad_creds)
+        mailSystem._persist_refreshed_token_if_needed()
+
+        good_creds = MagicMock()
+        good_creds.to_json.return_value = '{"updated": true}'
+        monkeypatch.setattr(mailSystem, "_gmail_creds", good_creds)
+        monkeypatch.setattr(mailSystem, "_last_saved_token_json", '{"old": true}')
+        with (
+            patch.object(mailSystem, "_write_token_atomic", side_effect=OSError("ro fs")),
+            caplog.at_level(logging.ERROR, logger=LOGGER),
+        ):
+            mailSystem._persist_refreshed_token_if_needed()
+        assert "更新されたGmailトークンの保存に失敗しました" in caplog.text
+
+
 class TestCheckMailJobExtra:
     @pytest.mark.parametrize(
         "gmail_ready,gc_ready", [(False, True), (True, False), (False, False)]
@@ -332,10 +381,12 @@ class TestCheckMailJobExtra:
         gmail = _gmail(["m1"])
         mailSystem.gmail_service = gmail
         mailSystem.gc = MagicMock()
-        with patch.object(mailSystem, "system"):
+        with patch.object(mailSystem, "system", return_value=True):
             mailSystem.check_mail_job()
 
-        gmail.users().messages().list.assert_called_once_with(userId="me", q=QUERY)
+        gmail.users().messages().list.assert_called_once_with(
+            userId="me", q=QUERY, maxResults=500
+        )
         gmail.users().messages().list().execute.assert_called_once_with(num_retries=3)
         gmail.users().messages().get.assert_called_once_with(
             userId="me", id="m1", format="full"
@@ -351,22 +402,23 @@ class TestCheckMailJobExtra:
         gmail.users().messages().get.return_value = req
         mailSystem.gmail_service = gmail
         mailSystem.gc = MagicMock()
-        with patch.object(mailSystem, "system"):
+        with patch.object(mailSystem, "system", return_value=True):
             mailSystem.check_mail_job()
         req.execute.assert_called_once_with(num_retries=3)
 
-    def test_after_timestamp_is_integer_epoch_seconds(self):
-        last = datetime.datetime(2026, 11, 20, 12, 0, 0, 987654)
+    def test_after_timestamp_is_integer_epoch_seconds_with_overlap(self):
+        last = datetime.datetime(2026, 11, 20, 12, 0, 0, 987654, tzinfo=datetime.timezone.utc)
         mailSystem.save_current_run_time(last)
         gmail = _gmail([])
         mailSystem.gmail_service = gmail
         mailSystem.gc = MagicMock()
         mailSystem.check_mail_job()
         q = gmail.users().messages().list.call_args.kwargs["q"]
-        assert q == f"{QUERY} after:{int(last.timestamp())}"
+        expected = int(last.timestamp()) - mailSystem.LAST_RUN_OVERLAP_SECONDS
+        assert q == f"{QUERY} after:{expected}"
         assert "." not in q.split("after:")[1]
 
-    def test_timezone_aware_last_run_time_uses_absolute_epoch(self):
+    def test_timezone_aware_last_run_time_uses_absolute_epoch_minus_overlap(self):
         jst = datetime.timezone(datetime.timedelta(hours=9))
         last = datetime.datetime(2026, 11, 20, 21, 0, 0, tzinfo=jst)
         mailSystem.save_current_run_time(last)
@@ -374,10 +426,13 @@ class TestCheckMailJobExtra:
         mailSystem.gmail_service = gmail
         mailSystem.gc = MagicMock()
         mailSystem.check_mail_job()
-        expected = int(
-            datetime.datetime(
-                2026, 11, 20, 12, 0, 0, tzinfo=datetime.timezone.utc
-            ).timestamp()
+        expected = (
+            int(
+                datetime.datetime(
+                    2026, 11, 20, 12, 0, 0, tzinfo=datetime.timezone.utc
+                ).timestamp()
+            )
+            - mailSystem.LAST_RUN_OVERLAP_SECONDS
         )
         assert (
             gmail.users()
@@ -387,12 +442,12 @@ class TestCheckMailJobExtra:
         )
 
     def test_saved_run_time_is_captured_before_processing(self, tmp_path, monkeypatch):
-        """last_run_time にはジョブ開始時点の now() が保存される（処理完了時刻ではない）。"""
-        fake_dt_module = types.SimpleNamespace(datetime=FixedDateTime)
-        monkeypatch.setattr(mailSystem, "datetime", fake_dt_module)
+        """last_run_time にはジョブ開始時点の UTC 時刻が保存される。"""
+        monkeypatch.setattr(mailSystem, "datetime", make_fixed_datetime_namespace())
 
         def _slow_system(_body):
             FixedDateTime.fixed_now = datetime.datetime(2026, 11, 27, 9, 45, 0)
+            return True
 
         monkeypatch.setattr(
             FixedDateTime, "fixed_now", datetime.datetime(2026, 11, 27, 9, 30, 0)
@@ -405,22 +460,21 @@ class TestCheckMailJobExtra:
         saved = json.loads(
             (tmp_path / "last_run_time.json").read_text(encoding="utf-8")
         )
-        assert saved == {"last_run_time": "2026-11-27T09:30:00"}
+        assert saved == {"last_run_time": "2026-11-27T09:30:00+00:00"}
 
-    def test_state_is_saved_even_when_every_message_fails(self, tmp_path):
+    def test_last_run_time_not_saved_when_every_message_fails_and_error_notified(self, tmp_path):
         mailSystem.gmail_service = _gmail(["bad"], {"bad": _http_error(500)})
         mailSystem.gc = MagicMock()
         with patch("src.mailSystem.mailDisco.MailDisco") as mock_disco:
             mailSystem.check_mail_job()
-        assert (tmp_path / "last_run_time.json").exists()
+        assert not (tmp_path / "last_run_time.json").exists()
         assert (
             json.loads(
                 (tmp_path / "processed_message_ids.json").read_text(encoding="utf-8")
             )
-            == []
+            == {}
         )
-        # メール単位のエラーでは Discord 通知しない
-        mock_disco.assert_not_called()
+        mock_disco.assert_called_once()
 
     def test_no_discord_notification_on_successful_run_without_messages(self):
         mailSystem.gmail_service = _gmail([])
@@ -439,7 +493,7 @@ class TestCheckMailJobExtra:
         gmail.users().messages().get.assert_not_called()
         assert "新しい対象メールは見つかりませんでした。" in caplog.text
 
-    def test_messages_processed_in_api_order(self):
+    def test_messages_processed_in_chronological_reverse_api_order(self):
         mailSystem.gmail_service = _gmail(
             ["c", "a", "b"],
             {
@@ -449,30 +503,28 @@ class TestCheckMailJobExtra:
             },
         )
         mailSystem.gc = MagicMock()
-        with patch.object(mailSystem, "system") as mock_system:
+        with patch.object(mailSystem, "system", return_value=True) as mock_system:
             mailSystem.check_mail_job()
-        assert [c.args[0] for c in mock_system.call_args_list] == ["C", "A", "B"]
+        assert [c.args[0] for c in mock_system.call_args_list] == ["B", "A", "C"]
 
     def test_duplicate_ids_in_same_listing_are_processed_once(self):
-        """現行仕様: 同一リスト内の重複IDはループ中に processed_ids へ追加されるので2回目はスキップ。"""
         mailSystem.gmail_service = _gmail(["dup", "dup"])
         mailSystem.gc = MagicMock()
-        with patch.object(mailSystem, "system") as mock_system:
+        with patch.object(mailSystem, "system", return_value=True) as mock_system:
             mailSystem.check_mail_job()
         assert mock_system.call_count == 1
 
-    def test_processed_ids_file_contains_list_of_ids(self, tmp_path):
+    def test_processed_ids_file_contains_timestamp_dict(self, tmp_path):
         mailSystem.gmail_service = _gmail(["x1", "x2"])
         mailSystem.gc = MagicMock()
-        with patch.object(mailSystem, "system"):
+        with patch.object(mailSystem, "system", return_value=True):
             mailSystem.check_mail_job()
         data = json.loads(
             (tmp_path / "processed_message_ids.json").read_text(encoding="utf-8")
         )
-        assert isinstance(data, list)
-        assert sorted(data) == ["x1", "x2"]
+        assert isinstance(data, dict)
+        assert sorted(data.keys()) == ["x1", "x2"]
 
-    # --- ログ（運用時の唯一の手掛かりなので文言を固定する） ---
     @pytest.mark.parametrize(
         "headers,expected",
         [
@@ -497,7 +549,7 @@ class TestCheckMailJobExtra:
         mailSystem.gmail_service = _gmail(["m"], {"m": _msg("本文", headers=headers)})
         mailSystem.gc = MagicMock()
         with (
-            patch.object(mailSystem, "system"),
+            patch.object(mailSystem, "system", return_value=True),
             caplog.at_level(logging.INFO, logger=LOGGER),
         ):
             mailSystem.check_mail_job()
@@ -513,7 +565,7 @@ class TestCheckMailJobExtra:
         mailSystem.gmail_service = _gmail(["old", "n1", "n2"])
         mailSystem.gc = MagicMock()
         with (
-            patch.object(mailSystem, "system"),
+            patch.object(mailSystem, "system", return_value=True),
             caplog.at_level(logging.INFO, logger=LOGGER),
         ):
             mailSystem.check_mail_job()
@@ -524,14 +576,16 @@ class TestCheckMailJobExtra:
         assert "処理中のメールID: old" not in messages
         assert "メールID n1 の処理が完了し、処理済みとしてマークしました。" in messages
 
-    def test_failed_messages_still_count_as_attempted(self, caplog):
+    def test_failed_messages_do_not_count_as_completed(self, caplog):
         mailSystem.gmail_service = _gmail(["e1"], {"e1": _http_error(500)})
         mailSystem.gc = MagicMock()
-        with caplog.at_level(logging.INFO, logger=LOGGER):
+        with (
+            patch("src.mailSystem.mailDisco.MailDisco"),
+            caplog.at_level(logging.INFO, logger=LOGGER),
+        ):
             mailSystem.check_mail_job()
-        assert "1 件の新しいメールの処理が完了しました。" in [
-            r.getMessage() for r in caplog.records
-        ]
+        messages = [r.getMessage() for r in caplog.records]
+        assert "新しい未処理メールはありませんでした（処理済みを除く）。" in messages
 
     def test_logs_when_all_candidates_already_processed(self, caplog):
         mailSystem.processed_ids = {"a", "b"}
@@ -558,15 +612,18 @@ class TestCheckMailJobExtra:
         )
 
         caplog.clear()
-        mailSystem.save_current_run_time(datetime.datetime(2026, 11, 20, 8, 5, 3))
+        last_dt = datetime.datetime(2026, 11, 20, 8, 5, 3, tzinfo=datetime.timezone.utc)
+        mailSystem.save_current_run_time(last_dt)
+        expected_after = int(last_dt.timestamp()) - mailSystem.LAST_RUN_OVERLAP_SECONDS
         with caplog.at_level(logging.INFO, logger=LOGGER):
             mailSystem.check_mail_job()
-        assert "最終チェック日時 (2026-11-20 08:05:03) 以降を検索。" in caplog.text
+        assert (
+            f"最終チェック日時 ({last_dt.isoformat()}) 以降を検索 (after:{expected_after})。"
+            in caplog.text
+        )
 
     def test_logs_start_and_end_banners_with_timestamp(self, caplog, monkeypatch):
-        monkeypatch.setattr(
-            mailSystem, "datetime", types.SimpleNamespace(datetime=FixedDateTime)
-        )
+        monkeypatch.setattr(mailSystem, "datetime", make_fixed_datetime_namespace())
         monkeypatch.setattr(
             FixedDateTime, "fixed_now", datetime.datetime(2026, 11, 27, 9, 30, 5)
         )
@@ -595,10 +652,14 @@ class TestCheckMailJobExtra:
             ["e"], {"e": {"payload": {"headers": [], "parts": []}}}
         )
         mailSystem.gc = MagicMock()
-        with caplog.at_level(logging.WARNING, logger=LOGGER):
+        with (
+            patch("src.mailSystem.mailDisco.MailDisco"),
+            caplog.at_level(logging.WARNING, logger=LOGGER),
+        ):
             mailSystem.check_mail_job()
         assert (
-            "メールID e の本文が見つかりませんでした。スキップします。" in caplog.text
+            "メールID e の本文が見つかりませんでした。処理済みに登録せずスキップします。"
+            in caplog.text
         )
 
     @pytest.mark.parametrize(
@@ -618,7 +679,11 @@ class TestCheckMailJobExtra:
             mailSystem.gmail_service = _gmail(["m"])
             ctx = patch.object(mailSystem, "system", side_effect=failure)
         mailSystem.gc = MagicMock()
-        with ctx, caplog.at_level(logging.ERROR, logger=LOGGER):
+        with (
+            patch("src.mailSystem.mailDisco.MailDisco"),
+            ctx,
+            caplog.at_level(logging.ERROR, logger=LOGGER),
+        ):
             mailSystem.check_mail_job()
         records = _error_records(caplog)
         assert len(records) == 1
@@ -670,7 +735,10 @@ class TestLoggingDetailsInStateAndSheet:
 
     def test_load_processed_ids_corrupt_file_log_contains_path(self, tmp_path, caplog):
         (tmp_path / "processed_message_ids.json").write_text("{", encoding="utf-8")
-        with caplog.at_level(logging.WARNING, logger=LOGGER):
+        with (
+            patch("src.mailSystem.mailDisco.MailDisco"),
+            caplog.at_level(logging.WARNING, logger=LOGGER),
+        ):
             mailSystem.load_processed_ids()
         assert (
             f"処理済みメールIDファイル '{tmp_path / 'processed_message_ids.json'}' が不正です。"
@@ -679,7 +747,7 @@ class TestLoggingDetailsInStateAndSheet:
 
     def test_system_logs_extraction_result(self, caplog):
         with (
-            patch.object(mailSystem, "sheet"),
+            patch.object(mailSystem, "sheet", return_value=True),
             caplog.at_level(logging.INFO, logger=LOGGER),
         ):
             mailSystem.system("利用日: 2026/05/01 10:00\n利用先: 店\n利用金額: 1,000円")
@@ -689,19 +757,19 @@ class TestLoggingDetailsInStateAndSheet:
 
     def test_system_does_not_warn_when_amount_simply_missing(self, caplog):
         with (
-            patch.object(mailSystem, "sheet"),
+            patch.object(mailSystem, "sheet", return_value=mailSystem.SHEET_SKIPPED),
             caplog.at_level(logging.WARNING, logger=LOGGER),
         ):
             mailSystem.system("利用日: 2026/05/01 10:00")
-        assert "数値に変換できませんでした" not in caplog.text
+        assert "書式が不正" not in caplog.text
 
-    def test_system_warning_includes_raw_amount(self, caplog):
+    def test_system_warning_includes_raw_malformed_amount(self, caplog):
         with (
-            patch.object(mailSystem, "sheet"),
+            patch.object(mailSystem, "sheet", return_value=mailSystem.SHEET_SKIPPED),
             caplog.at_level(logging.WARNING, logger=LOGGER),
         ):
-            mailSystem.system("利用金額: 1,-2円")
-        assert "金額 '1,-2' を数値に変換できませんでした。" in caplog.text
+            mailSystem.system("利用金額: -1,23円")
+        assert "金額 '-1,23' の書式が不正なため N/A として扱います。" in caplog.text
 
     def test_timesheet_warning_includes_input(self, caplog):
         with caplog.at_level(logging.WARNING, logger=LOGGER):

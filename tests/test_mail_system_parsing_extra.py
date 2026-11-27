@@ -1,11 +1,9 @@
 """
-system() / get_email_body() / decode_base64_url_safe() の追加回帰テスト。
-
-既存テストでカバーされていない「正規表現の境界」「実メールに近い本文」
-「payload 構造のバリエーション」を現行 main の振る舞いとして固定する。
+system() / parse_mail_body() / get_email_body() / decode_base64_url_safe() の追加回帰テスト。
 """
 
 import base64
+import copy
 from unittest.mock import patch
 
 import pytest
@@ -13,7 +11,6 @@ import pytest
 import src.mailSystem as mailSystem
 from tests.conftest import encode_b64url
 
-# 三井住友カード（クレジット）の利用通知に近い本文
 CREDIT_MAIL = """\
 三井住友カード 太郎 様
 
@@ -33,7 +30,6 @@ CREDIT_MAIL = """\
 ※本メールは送信専用です。
 """
 
-# デビット（Olive 等）の利用通知に近い本文
 DEBIT_MAIL = """\
 デビットカードのご利用がありました。
 
@@ -44,7 +40,7 @@ DEBIT_MAIL = """\
 
 
 def _call(body):
-    with patch.object(mailSystem, "sheet") as mock_sheet:
+    with patch.object(mailSystem, "sheet", return_value=True) as mock_sheet:
         mailSystem.system(body)
     mock_sheet.assert_called_once()
     return mock_sheet.call_args.args
@@ -63,7 +59,6 @@ class TestSystemRealisticBodies:
 
     def test_crlf_line_endings(self):
         body = "ご利用日時：2026/11/01 10:00\r\nご利用場所：スーパーA\r\nご利用金額：100円\r\n"
-        # [^\n]+ は \r を含むが strip() で除去される
         assert _call(body) == ("2026/11/01 10:00", "スーパーA", 100)
 
     def test_first_occurrence_wins_when_fields_repeat(self):
@@ -93,10 +88,7 @@ class TestSystemRealisticBodies:
         body = "利用先：ＡＭＡＺＯＮ．ＣＯ．ＪＰ（ｱﾏｿﾞﾝ）/ 決済#123\n利用金額：99円"
         assert _call(body)[1] == "ＡＭＡＺＯＮ．ＣＯ．ＪＰ（ｱﾏｿﾞﾝ）/ 決済#123"
 
-    @pytest.mark.parametrize(
-        "label",
-        ["利用日", "ご利用日時"],
-    )
+    @pytest.mark.parametrize("label", ["利用日", "ご利用日時"])
     @pytest.mark.parametrize("colon", [":", "："])
     def test_datetime_label_and_colon_variants(self, label, colon):
         assert _call(f"{label}{colon}2026/08/15 12:00")[0] == "2026/08/15 12:00"
@@ -111,13 +103,15 @@ class TestSystemRealisticBodies:
     def test_amount_label_and_colon_variants(self, label, colon):
         assert _call(f"{label}{colon}1,000円")[2] == 1000
 
+    def test_datetime_flexible_variants_are_normalized(self):
+        assert _call("ご利用日時：2026/1/1 10:00")[0] == "2026/1/1 10:00"
+        assert _call("ご利用日時：2026-11-01 10:00")[0] == "2026/11/01 10:00"
+
     @pytest.mark.parametrize(
         "body",
         [
-            "ご利用日時：2026/1/1 10:00",  # 月日がゼロ埋めされていない
-            "ご利用日時：2026-11-01 10:00",  # ハイフン区切り
-            "ご利用日時：2026/11/01",  # 時刻なし
-            "ご利用日時：26/11/01 10:00",  # 2桁年
+            "ご利用日時：2026/11/01",
+            "ご利用日時：26/11/01 10:00",
             "ご利用日時：2026/11/01 10時00分",
         ],
     )
@@ -128,13 +122,16 @@ class TestSystemRealisticBodies:
         assert _call("利用日：2026/11/01 10:00:59")[0] == "2026/11/01 10:00:59"
         assert _call("利用日：2026/11/01 10:00")[0] == "2026/11/01 10:00"
 
+    def test_amount_allows_space_before_yen_and_unicode_minus(self):
+        assert _call("ご利用金額：1,000 円")[2] == 1000
+        assert _call("ご利用金額：▲1,500円")[2] == -1500
+
     @pytest.mark.parametrize(
         "body",
         [
-            "ご利用金額：１，０００円",  # 全角数字
-            "ご利用金額：1,000 円",  # 「円」の前に空白
-            "ご利用金額：￥1,000円",  # 円記号付き
-            "ご利用金額：1,000",  # 「円」なし
+            "ご利用金額：１，０００円",
+            "ご利用金額：￥1,000円",
+            "ご利用金額：1,000",
             "ご利用金額：1,000JPY",
         ],
     )
@@ -147,7 +144,6 @@ class TestSystemRealisticBodies:
         assert type(amount) is int
 
     def test_label_must_be_followed_by_value_on_regex_terms(self):
-        # 「利用」だけ・ラベル違いでは何も抽出されない
         assert _call("利用：2026/11/01 10:00\n場所：店\n金額：100円") == (
             "N/A",
             "N/A",
@@ -158,7 +154,7 @@ class TestSystemRealisticBodies:
         assert _call("") == ("N/A", "N/A", "N/A")
 
     def test_sheet_receives_positional_args_in_order(self):
-        with patch.object(mailSystem, "sheet") as mock_sheet:
+        with patch.object(mailSystem, "sheet", return_value=True) as mock_sheet:
             mailSystem.system(DEBIT_MAIL)
         args, kwargs = mock_sheet.call_args
         assert kwargs == {}
@@ -175,14 +171,14 @@ class TestGetEmailBodyExtra:
         }
         assert mailSystem.get_email_body(payload) == "1つ目"
 
-    def test_last_html_part_wins_when_multiple_html_parts_and_no_plain(self):
+    def test_first_html_part_wins_when_multiple_html_parts_and_no_plain(self):
         payload = {
             "parts": [
                 {"mimeType": "text/html", "body": {"data": encode_b64url("<p>1</p>")}},
                 {"mimeType": "text/html", "body": {"data": encode_b64url("<p>2</p>")}},
             ]
         }
-        assert mailSystem.get_email_body(payload) == "<p>2</p>"
+        assert mailSystem.get_email_body(payload) == "1\n"
 
     def test_parts_take_precedence_over_top_level_body(self):
         payload = {
@@ -193,13 +189,13 @@ class TestGetEmailBodyExtra:
         }
         assert mailSystem.get_email_body(payload) == "パート本文"
 
-    def test_top_level_body_ignored_when_parts_key_exists_but_empty(self):
-        payload = {"parts": [], "body": {"data": encode_b64url("無視される")}}
-        assert mailSystem.get_email_body(payload) == ""
+    def test_top_level_body_used_when_parts_key_exists_but_empty(self):
+        payload = {"parts": [], "body": {"data": encode_b64url("トップ本文")}}
+        assert mailSystem.get_email_body(payload) == "トップ本文"
 
-    def test_parts_without_mime_type_are_ignored(self):
+    def test_parts_without_mime_type_decode_as_plain_text(self):
         payload = {"parts": [{"body": {"data": encode_b64url("x")}}]}
-        assert mailSystem.get_email_body(payload) == ""
+        assert mailSystem.get_email_body(payload) == "x"
 
     def test_attachment_parts_are_skipped_before_plain(self):
         payload = {
@@ -211,12 +207,12 @@ class TestGetEmailBodyExtra:
         }
         assert mailSystem.get_email_body(payload) == "本文"
 
-    def test_single_part_html_body_is_returned(self):
+    def test_single_part_html_body_is_converted_to_text(self):
         payload = {
             "mimeType": "text/html",
             "body": {"data": encode_b64url("<b>HTML</b>")},
         }
-        assert mailSystem.get_email_body(payload) == "<b>HTML</b>"
+        assert mailSystem.get_email_body(payload) == "HTML"
 
     def test_does_not_mutate_payload(self):
         payload = {
@@ -224,8 +220,6 @@ class TestGetEmailBodyExtra:
                 {"mimeType": "text/plain", "body": {"data": encode_b64url("本文")}}
             ],
         }
-        import copy
-
         snapshot = copy.deepcopy(payload)
         mailSystem.get_email_body(payload)
         assert payload == snapshot
@@ -239,17 +233,12 @@ class TestGetEmailBodyExtra:
 
 class TestDecodeExtra:
     def test_uses_urlsafe_alphabet_not_standard(self):
-        raw = bytes([0xFB, 0xFF, 0xBF])  # 標準Base64では '+/+/' 系になるバイト列
-        std = base64.b64encode(raw).decode()
+        raw = b"\x81\x00\xff\xfe"
         safe = base64.urlsafe_b64encode(raw).decode()
-        assert std != safe
-        assert "-" in safe or "_" in safe
-        # URL-safe 版はデコードできる（UTF-8 として不正なので UnicodeDecodeError まで到達する）
         with pytest.raises(UnicodeDecodeError):
             mailSystem.decode_base64_url_safe(safe)
 
     def test_iso_2022_jp_fallback_is_used_when_utf8_fails(self):
-        """bytes.decode をスタブして、UTF-8 失敗時に iso-2022-jp で再デコードされる経路を検証する。"""
         calls = []
 
         class FakeBytes(bytes):
@@ -268,7 +257,6 @@ class TestDecodeExtra:
     @pytest.mark.parametrize("pad", ["", "=", "=="])
     def test_existing_padding_is_tolerated(self, pad):
         encoded = base64.urlsafe_b64encode("ab".encode()).decode().rstrip("=") + pad
-        # 'ab' は 1 つ分のパディングが必要。過剰な '=' があっても b64decode は許容する
         assert mailSystem.decode_base64_url_safe(encoded) == "ab"
 
     def test_padding_is_added_to_reach_multiple_of_four(self):

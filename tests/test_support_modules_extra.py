@@ -2,6 +2,7 @@
 
 import builtins
 import logging
+import os
 import re
 import sys
 from logging.handlers import TimedRotatingFileHandler
@@ -11,6 +12,7 @@ import pytest
 import requests
 
 import src.logger_config as logger_config
+import src.mailDisco as mailDisco
 import src.purpose as purpose_module
 from src.mailDisco import MailDisco
 from src.purpose import Purpose
@@ -30,11 +32,8 @@ def _setup_csv(monkeypatch, tmp_path, content):
     return path
 
 
-# ---------------------------------------------------------------------------
-# Purpose
-# ---------------------------------------------------------------------------
 class TestPurposeExtra:
-    def test_reads_config_categories_csv_relative_to_repo_with_utf8(
+    def test_reads_config_categories_csv_relative_to_repo_with_utf8_sig(
         self, monkeypatch, tmp_path
     ):
         path = _setup_csv(monkeypatch, tmp_path, "店\n")
@@ -47,7 +46,7 @@ class TestPurposeExtra:
 
         with patch("builtins.open", side_effect=_spy):
             Purpose("店")
-        assert seen == [(str(path), (), {"mode": "r", "encoding": "utf-8"})]
+        assert seen == [(str(path), (), {"mode": "r", "encoding": "utf-8-sig"})]
 
     def test_missing_file_is_warning_not_error_and_open_not_attempted(
         self, monkeypatch, tmp_path, caplog
@@ -99,17 +98,13 @@ class TestPurposeExtra:
 
     def test_read_error_logged_with_traceback(self, monkeypatch, tmp_path, caplog):
         path = _setup_csv(monkeypatch, tmp_path, "")
-        path.write_bytes(b"\xff\xfe\xfa")
+        path.write_bytes(b"\x81\x00\xff\xfe")
         with caplog.at_level(logging.ERROR, logger=PURPOSE_LOGGER):
             Purpose("x")
         rec = [r for r in caplog.records if r.levelno == logging.ERROR]
         assert len(rec) == 1
         assert rec[0].exc_info and rec[0].exc_info[0] is not None
-        assert (
-            rec[0]
-            .getMessage()
-            .startswith("カテゴリ定義ファイルの読み込み中にエラーが発生しました: ")
-        )
+        assert rec[0].getMessage() == "カテゴリ定義ファイルの読み込み中にエラーが発生しました"
 
     def test_quoted_csv_cells_with_commas(self, monkeypatch, tmp_path):
         _setup_csv(monkeypatch, tmp_path, '"店A, 本店",店B\n')
@@ -128,46 +123,53 @@ class TestPurposeExtra:
     def test_judge_with_non_string_location(self, monkeypatch, tmp_path):
         _setup_csv(monkeypatch, tmp_path, "100\n")
         assert Purpose(None).judge() is None
-        assert Purpose(100).judge() is None  # CSV 側は文字列 '100'
+        assert Purpose(100).judge() is None
 
     def test_location_is_stored(self, monkeypatch, tmp_path):
         _setup_csv(monkeypatch, tmp_path, "")
         assert Purpose("店").location == "店"
 
-    def test_cache_shared_through_subclass_lookup(self, monkeypatch, tmp_path):
-        """_category_map はクラス属性。インスタンス作成後に CSV を変えても再読み込みされない。"""
+    def test_cache_reused_when_mtime_unchanged_and_reloaded_when_mtime_changes(
+        self, monkeypatch, tmp_path
+    ):
         path = _setup_csv(monkeypatch, tmp_path, "旧店\n")
+        os.utime(path, (1000, 1000))
         assert Purpose("旧店").judge() == "食費"
+
+        # mtime が同じままならキャッシュを維持
         path.write_text("新店\n", encoding="utf-8")
+        os.utime(path, (1000, 1000))
         assert Purpose("新店").judge() is None
         assert Purpose("旧店").judge() == "食費"
 
+        # mtime が変化すると自動で再読み込みされる（Issue #29）
+        os.utime(path, (2000, 2000))
+        assert Purpose("新店").judge() == "食費"
 
-# ---------------------------------------------------------------------------
-# MailDisco
-# ---------------------------------------------------------------------------
+
 class TestMailDiscoExtra:
     def test_webhook_url_is_read_at_send_time_not_init(self, monkeypatch):
         monkeypatch.delenv("DISCORD_WEBHOOK_URL", raising=False)
         disco = MailDisco("msg")
         monkeypatch.setenv("DISCORD_WEBHOOK_URL", "https://example.invalid/hook")
-        with patch(
-            "src.mailDisco.requests.post", return_value=MagicMock(ok=True)
+        with patch.object(
+            mailDisco._default_session, "post", return_value=MagicMock(ok=True)
         ) as post:
             disco.send()
         post.assert_called_once()
         assert post.call_args.args == ("https://example.invalid/hook",)
 
-    def test_send_returns_none(self, monkeypatch):
+    def test_send_returns_bool(self, monkeypatch):
         monkeypatch.setenv("DISCORD_WEBHOOK_URL", "https://example.invalid/hook")
-        with patch("src.mailDisco.requests.post", return_value=MagicMock(ok=True)):
-            assert MailDisco("x").send() is None
+        with patch.object(mailDisco._default_session, "post", return_value=MagicMock(ok=True)):
+            assert MailDisco("x").send() is True
 
     def test_success_logs_nothing(self, monkeypatch, caplog):
         monkeypatch.setenv("DISCORD_WEBHOOK_URL", "https://example.invalid/hook")
         with (
-            patch(
-                "src.mailDisco.requests.post",
+            patch.object(
+                mailDisco._default_session,
+                "post",
                 return_value=MagicMock(ok=True, status_code=204),
             ),
             caplog.at_level(logging.DEBUG, logger=DISCO_LOGGER),
@@ -183,16 +185,16 @@ class TestMailDiscoExtra:
             "環境変数 'DISCORD_WEBHOOK_URL' が設定されていません。Discord通知をスキップします。"
         ]
 
-    def test_status_error_text(self, monkeypatch, caplog):
+    def test_status_error_text_after_retries(self, monkeypatch, caplog):
         monkeypatch.setenv("DISCORD_WEBHOOK_URL", "https://example.invalid/hook")
+        resp = MagicMock(ok=False, status_code=429, headers={})
+        resp.json.side_effect = ValueError("no json")
         with (
-            patch(
-                "src.mailDisco.requests.post",
-                return_value=MagicMock(ok=False, status_code=429),
-            ),
+            patch.object(mailDisco._default_session, "post", return_value=resp),
+            patch("src.mailDisco.time.sleep"),
             caplog.at_level(logging.ERROR, logger=DISCO_LOGGER),
         ):
-            MailDisco("x").send()
+            assert MailDisco("x").send() is False
         assert [r.getMessage() for r in caplog.records] == [
             "Discord通知の送信に失敗しました。ステータスコード: 429"
         ]
@@ -200,30 +202,28 @@ class TestMailDiscoExtra:
     def test_exception_text_includes_reason(self, monkeypatch, caplog):
         monkeypatch.setenv("DISCORD_WEBHOOK_URL", "https://example.invalid/hook")
         with (
-            patch(
-                "src.mailDisco.requests.post",
+            patch.object(
+                mailDisco._default_session,
+                "post",
                 side_effect=requests.exceptions.Timeout("read timed out"),
             ),
             caplog.at_level(logging.ERROR, logger=DISCO_LOGGER),
         ):
-            MailDisco("x").send()
+            assert MailDisco("x").send() is False
         assert [r.getMessage() for r in caplog.records] == [
             "Discord通知の送信中にエラーが発生しました: read timed out"
         ]
 
     def test_non_request_exceptions_propagate(self, monkeypatch):
-        """現行仕様: RequestException 以外（プログラミングエラー等）は握りつぶさない。"""
+        """RequestException 以外（プログラミングエラー等）は握りつぶさない。"""
         monkeypatch.setenv("DISCORD_WEBHOOK_URL", "https://example.invalid/hook")
         with (
-            patch("src.mailDisco.requests.post", side_effect=ValueError("bad")),
+            patch.object(mailDisco._default_session, "post", side_effect=ValueError("bad")),
             pytest.raises(ValueError),
         ):
             MailDisco("x").send()
 
 
-# ---------------------------------------------------------------------------
-# logger_config
-# ---------------------------------------------------------------------------
 @pytest.fixture
 def isolated_logger(monkeypatch, tmp_path):
     name = "smbc_card_recorder_test_extra"
@@ -236,10 +236,12 @@ def isolated_logger(monkeypatch, tmp_path):
     for h in list(root.handlers):
         root.removeHandler(h)
         h.close()
+    root.propagate = True
     yield name, tmp_path
     for h in list(root.handlers):
         root.removeHandler(h)
         h.close()
+    root.propagate = True
 
 
 class TestLoggerConfigExtra:
@@ -259,7 +261,7 @@ class TestLoggerConfigExtra:
         ]
         assert len(rotating) == 2
         for h in rotating:
-            assert h.interval == 24 * 60 * 60  # when="midnight", interval=1 -> 1日
+            assert h.interval == 24 * 60 * 60
             assert h.backupCount == 30
 
     def test_log_line_format(self, isolated_logger):
@@ -289,7 +291,7 @@ class TestLoggerConfigExtra:
             if type(h) is logging.StreamHandler
         )
         assert console.level == logging.INFO
-        assert console.stream is sys.stderr  # 標準エラー出力へ出す
+        assert console.stream is sys.stderr
         child.debug("見えないデバッグ")
         child.info("コンソール情報")
         err = capsys.readouterr().err
@@ -305,7 +307,7 @@ class TestLoggerConfigExtra:
     def test_existing_logs_dir_is_ok(self, isolated_logger):
         _, tmp_path = isolated_logger
         (tmp_path / "logs").mkdir()
-        logger_config.setup_logger()  # exist_ok=True で例外にならない
+        logger_config.setup_logger()
 
     def test_child_loggers_propagate_to_root(self, isolated_logger):
         child = logger_config.setup_logger("prop")

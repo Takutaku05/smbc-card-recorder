@@ -1,16 +1,15 @@
 """
 `python -m src.mailSystem` / `python src/mailSystem.py` 実行時（__main__ ブロック）の追加回帰テスト。
-
-実際の Google / Discord / ファイル書き込みには一切触れず、起動シーケンスの順序・
-スケジュール登録・初回実行・メインループ・停止通知を検証する。
 """
 
 import json
-from unittest.mock import MagicMock
+import signal
+from unittest.mock import MagicMock, patch
 
 import pytest
 import schedule as schedule_mod
 
+import src.mailSystem as mailSystem
 from tests.conftest import run_main_block as _run_main
 
 
@@ -51,7 +50,6 @@ class TestMainEntrypointExtra:
 
     def test_initial_check_runs_once_immediately(self):
         result = _run_main()
-        # 初回実行で Gmail 検索が1回行われ、state が書き込まれる
         result["gmail"].users().messages().list().execute.assert_called_once_with(
             num_retries=3
         )
@@ -73,7 +71,6 @@ class TestMainEntrypointExtra:
 
     def test_main_loop_calls_run_pending_every_second_until_interrupt(self):
         result = _run_main(sleep_effects=(None, None, None, KeyboardInterrupt))
-        # 1回目の sleep は初回実行後、その後ループで run_pending -> sleep を繰り返す
         assert result["run_pending"].call_count == 3
         assert all(c.args == (1,) for c in result["sleep"].call_args_list)
 
@@ -85,3 +82,17 @@ class TestMainEntrypointExtra:
         result["run_pending"].assert_not_called()
         result["sleep"].assert_not_called()
         assert schedule_mod.jobs == []
+
+    def test_sigterm_handler_saves_state_notifies_and_exits_zero(self, tmp_path):
+        mailSystem.processed_ids = {"sigterm_msg"}
+        with (
+            patch("src.mailSystem.mailDisco.MailDisco") as mock_disco,
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            mailSystem._handle_sigterm(signal.SIGTERM, None)
+        assert exc_info.value.code == 0
+        mock_disco.assert_called_once_with("--- メール監視システムを停止しました ---")
+        saved = json.loads(
+            (tmp_path / "processed_message_ids.json").read_text(encoding="utf-8")
+        )
+        assert "sigterm_msg" in saved
