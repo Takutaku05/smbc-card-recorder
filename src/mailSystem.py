@@ -262,20 +262,31 @@ def system(mes_body):
     :return: スプレッドシートへの書き込みに成功した場合 True、失敗した場合 False
     :rtype: bool
     """
-    utilization_datetime_match = re.search(r"(?:利用日|ご利用日時)\s*[:：]\s*(\d{4}/\d{2}/\d{2} \d{2}:\d{2}(?::\d{2})?)", mes_body)
-    utilization_datetime = utilization_datetime_match.group(1) if utilization_datetime_match else "N/A"
+    utilization_datetime_match = re.search(
+        r"(?:利用日|ご利用日時)\s*[:：]?\s*(\d{4}[/-]\d{1,2}[/-]\d{1,2}[\s　]+\d{1,2}:\d{2}(?::\d{2})?)",
+        mes_body,
+    )
+    if utilization_datetime_match:
+        raw_dt = utilization_datetime_match.group(1)
+        utilization_datetime = re.sub(r"[\s　]+", " ", raw_dt.strip()).replace("-", "/")
+    else:
+        utilization_datetime = "N/A"
     utilization_location_match = re.search(r"(?:利用先|ご利用場所)\s*[:：]\s*([^\n]+)", mes_body)
     utilization_location = utilization_location_match.group(1).strip() if utilization_location_match else "N/A"
-    utilization_amount_match = re.search(r"ご?利用金額\s*[:：]?\s*([-\d,]+)円", mes_body)
-    utilization_amount_str = utilization_amount_match.group(1) if utilization_amount_match else "N/A"
+    utilization_amount_match = re.search(
+        r"ご?利用金額\s*[:：]?\s*([-−－▲△]?)\s*([\d,]+)\s*円",
+        mes_body,
+    )
     utilization_amount = "N/A"
-    if utilization_amount_str != "N/A":
-        try:
-            cleaned_amount_str = utilization_amount_str.replace(',', '')
-            utilization_amount = int(cleaned_amount_str)
-        except ValueError:
-            utilization_amount = utilization_amount_str
-            logger.warning("金額 '%s' を数値に変換できませんでした。", utilization_amount_str)
+    if utilization_amount_match:
+        sign_str, digits_str = utilization_amount_match.group(1), utilization_amount_match.group(2)
+        if re.fullmatch(r"\d{1,3}(?:,\d{3})*|\d+", digits_str):
+            parsed_amount = int(digits_str.replace(",", ""))
+            if sign_str in ("-", "−", "－", "▲", "△"):
+                parsed_amount = -parsed_amount
+            utilization_amount = parsed_amount
+        else:
+            logger.warning("金額 '%s%s' の書式が不正なため N/A として扱います。", sign_str, digits_str)
     
     logger.info("抽出結果: 利用日=%s, 利用先=%s, 利用金額=%s", utilization_datetime, utilization_location, utilization_amount)
     
@@ -419,14 +430,15 @@ def timesheet(time):
     :return: シート名（例: '11月'）
     :rtype: str
     """
+    normalized_time = re.sub(r"[\s　]+", " ", str(time).strip()).replace("-", "/")
     time_object = None
     try:
         # まず HH:MM:SS 形式 (デビットカード用など) で試す
-        time_object = datetime.datetime.strptime(time, '%Y/%m/%d %H:%M:%S')
+        time_object = datetime.datetime.strptime(normalized_time, '%Y/%m/%d %H:%M:%S')
     except ValueError:
         try:
             # 次に HH:MM 形式 (クレジットカード用など) で試す
-            time_object = datetime.datetime.strptime(time, '%Y/%m/%d %H:%M')
+            time_object = datetime.datetime.strptime(normalized_time, '%Y/%m/%d %H:%M')
         except ValueError:
             # どちらも失敗した場合
             logger.warning("timesheet関数: 日付 '%s' の形式が不正です。デフォルトの月を使用します。", time)
