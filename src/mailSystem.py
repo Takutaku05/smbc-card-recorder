@@ -125,9 +125,7 @@ def decode_base64_url_safe(data, charset=None):
             if isinstance(err, UnicodeDecodeError):
                 last_error = err
 
-    if last_error is not None:
-        raise last_error
-    raise UnicodeDecodeError("utf-8", decoded_bytes, 0, len(decoded_bytes), "failed to decode email body")
+    raise last_error
 
 
 def _html_to_text(html_body):
@@ -260,6 +258,8 @@ def get_last_run_time():
         try:
             with open(LAST_RUN_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
+                if not isinstance(data, dict):
+                    raise TypeError("last_run_time.json のルート要素はオブジェクトである必要があります。")
                 dt = datetime.datetime.fromisoformat(data.get("last_run_time"))
                 return dt.astimezone(datetime.timezone.utc)
         except (json.JSONDecodeError, TypeError, ValueError, OSError) as e:
@@ -452,7 +452,6 @@ def sheet(email_time, location, money):
             # 同じ本文を再試行しても抽出結果は変わらないため、失敗(False)ではなくスキップとして返す
             return SHEET_SKIPPED
 
-        is_complete_data = True
         sheet_name = timesheet(email_time)
 
         actual_sheet_name = sheet_name
@@ -487,7 +486,7 @@ def sheet(email_time, location, money):
                 mailDisco.MailDisco(
                     f"⚠️ ワークシート '{sheet_name}' が見つからず、'Sheet1' ({written_pos}) に書き込みました。\n利用先: {location} / 金額: {money}"
                 ).send()
-            elif is_complete_data:
+            else:
                 mailDisco.MailDisco(
                     f"【正常に書き込みました】\nシート: {actual_sheet_name} ({written_pos})\n利用先: {location}\n金額: {money}"
                 ).send()
@@ -596,8 +595,12 @@ def parse_mail_body(mes_body):
     else:
         utilization_datetime = "N/A"
 
-    utilization_location_match = re.search(r"(?:利用先|ご利用場所)\s*[:：]\s*([^\n]+)", mes_body)
-    utilization_location = utilization_location_match.group(1).strip() if utilization_location_match else "N/A"
+    utilization_location_match = re.search(
+        r"(?:利用先|ご利用場所)[ \t\u3000]*[:：][ \t\u3000]*([^\r\n]*)",
+        mes_body,
+    )
+    raw_location = utilization_location_match.group(1).strip() if utilization_location_match else ""
+    utilization_location = raw_location if raw_location else "N/A"
 
     utilization_amount_match = re.search(
         r"ご?利用金額\s*[:：]?\s*([-−－▲△]?)\s*([\d,]+)\s*円",

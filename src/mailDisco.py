@@ -107,7 +107,8 @@ class DiscordNotifier:
         }
 
         try:
-            for attempt in range(self.max_retries + 1):
+            attempt = 0
+            while True:
                 response = self.session.post(webhook_url, json=payload, timeout=self.timeout)
                 if response.ok:
                     return True
@@ -121,6 +122,7 @@ class DiscordNotifier:
                         self.max_retries,
                     )
                     time.sleep(wait_seconds)
+                    attempt += 1
                     continue
 
                 logger.error("Discord通知の送信に失敗しました。ステータスコード: %d", response.status_code)
@@ -128,8 +130,6 @@ class DiscordNotifier:
         except requests.exceptions.RequestException as e:
             logger.error("Discord通知の送信中にエラーが発生しました: %s", e)
             return False
-
-        return False
 
 
 class MailDisco:
