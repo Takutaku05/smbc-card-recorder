@@ -51,6 +51,7 @@ def test_initialize_services_uses_backoff_http_client(tmp_path, monkeypatch):
 
     monkeypatch.setattr(mailSystem, "TOKEN_FILE", str(token_file))
     monkeypatch.setattr(mailSystem, "SERVICE_ACCOUNT_FILE", "dummy_sa.json")
+    monkeypatch.setattr(mailSystem, "SPREADSHEET_ID", "dummy-sheet-id")
     monkeypatch.setattr(mailSystem, "GmailCredentials", types.SimpleNamespace(from_authorized_user_file=lambda *_a: creds))
     monkeypatch.setattr(mailSystem, "build", lambda *_a, **_kw: MagicMock())
     monkeypatch.setattr(_gspread, "BackOffHTTPClient", backoff_cls, raising=False)
