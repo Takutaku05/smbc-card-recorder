@@ -39,6 +39,10 @@ SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 gc = None
 processed_ids = set()
 gmail_service = None
+_cached_gc = None
+_cached_spreadsheet_id = None
+_cached_spreadsheet = None
+_worksheet_cache = {}
 
 
 def _extract_charset(part):
@@ -300,14 +304,25 @@ def sheet(email_time, location, money):
     :return: 書き込みに成功した場合 True、失敗した場合 False
     :rtype: bool
     """
-    global gc
+    global gc, _cached_gc, _cached_spreadsheet_id, _cached_spreadsheet, _worksheet_cache
 
     if gc is None:
         logger.error("GSpread認証が完了していません。データを書き込めません。")
         return False
 
     try:
-        spreadsheet = gc.open_by_key(SPREADSHEET_ID)
+        if (
+            _cached_spreadsheet is None
+            or _cached_gc is not gc
+            or _cached_spreadsheet_id != SPREADSHEET_ID
+        ):
+            spreadsheet = gc.open_by_key(SPREADSHEET_ID)
+            _cached_gc = gc
+            _cached_spreadsheet_id = SPREADSHEET_ID
+            _cached_spreadsheet = spreadsheet
+            _worksheet_cache = {}
+        else:
+            spreadsheet = _cached_spreadsheet
         is_complete_data = False
         if email_time == "N/A":
             logger.warning("利用日が抽出できませんでした。")
@@ -329,12 +344,20 @@ def sheet(email_time, location, money):
         used_fallback_sheet = False
 
         try:
-            worksheet = spreadsheet.worksheet(sheet_name)
+            if sheet_name in _worksheet_cache:
+                worksheet = _worksheet_cache[sheet_name]
+            else:
+                worksheet = spreadsheet.worksheet(sheet_name)
+                _worksheet_cache[sheet_name] = worksheet
         except gspread.exceptions.WorksheetNotFound:
             logger.error("ワークシート '%s' が見つかりません。", sheet_name)
             try:
                 logger.info("フォールバックとして 'Sheet1' への書き込みを試みます。")
-                worksheet = spreadsheet.worksheet("Sheet1")
+                if "Sheet1" in _worksheet_cache:
+                    worksheet = _worksheet_cache["Sheet1"]
+                else:
+                    worksheet = spreadsheet.worksheet("Sheet1")
+                    _worksheet_cache["Sheet1"] = worksheet
                 actual_sheet_name = "Sheet1"
                 used_fallback_sheet = True
             except gspread.exceptions.WorksheetNotFound:
@@ -473,7 +496,7 @@ def initialize_services():
     :return: 両方のサービス初期化に成功した場合 True、失敗した場合 False
     :rtype: bool
     """
-    global gc, gmail_service
+    global gc, gmail_service, _cached_gc, _cached_spreadsheet_id, _cached_spreadsheet, _worksheet_cache
 
     logger.info("--- サービス初期化開始 ---")
     
@@ -520,7 +543,15 @@ def initialize_services():
         if not SERVICE_ACCOUNT_FILE:
             logger.error("環境変数 'SERVICE_ACCOUNT_FILE' が設定されていません。 .envファイルを確認してください。")
             return False
-        gc = gspread.service_account(filename=SERVICE_ACCOUNT_FILE, scopes=SCOPES_SHEET)
+        sa_kwargs = {"filename": SERVICE_ACCOUNT_FILE, "scopes": SCOPES_SHEET}
+        backoff_client = getattr(gspread, "BackOffHTTPClient", None)
+        if backoff_client is not None:
+            sa_kwargs["http_client"] = backoff_client
+        gc = gspread.service_account(**sa_kwargs)
+        _cached_gc = None
+        _cached_spreadsheet_id = None
+        _cached_spreadsheet = None
+        _worksheet_cache = {}
         logger.info("Google スプレッドシートAPIに接続しました。")
     except FileNotFoundError:
         logger.error("サービスアカウントファイル '%s' が見つかりません。 (.envファイルを確認してください)", SERVICE_ACCOUNT_FILE)
