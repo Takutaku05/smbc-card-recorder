@@ -69,6 +69,7 @@ def test_sheet_returns_false_on_spreadsheet_not_found(monkeypatch):
     gc = MagicMock()
     gc.open_by_key.side_effect = _gspread.exceptions.SpreadsheetNotFound("not found")
     monkeypatch.setattr(mailSystem, "gc", gc)
+    monkeypatch.setattr(mailSystem.mailDisco, "MailDisco", MagicMock())
 
     assert mailSystem.sheet("2026/01/05 12:00", "テスト店", 1000) is False
 
