@@ -5,6 +5,16 @@ from logging.handlers import TimedRotatingFileHandler
 _ROOT_LOGGER_NAME = "smbc_card_recorder"
 
 
+class _RestrictedTimedRotatingFileHandler(TimedRotatingFileHandler):
+    """ログファイルを 0600 パーミッションで作成・オープンするハンドラ。"""
+
+    def _open(self):
+        flags = os.O_CREAT | os.O_APPEND | os.O_WRONLY
+        fd = os.open(self.baseFilename, flags, 0o600)
+        os.chmod(self.baseFilename, 0o600)
+        return os.fdopen(fd, self.mode, encoding=self.encoding, errors=self.errors)
+
+
 def _init_root_logger():
     """親ロガーにハンドラを一度だけ設定する。"""
     logger = logging.getLogger(_ROOT_LOGGER_NAME)
@@ -29,9 +39,10 @@ def _init_root_logger():
     # --- ファイルハンドラ（日付ローテーション） ---
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     log_dir = os.path.join(base_dir, "logs")
-    os.makedirs(log_dir, exist_ok=True)
+    os.makedirs(log_dir, mode=0o700, exist_ok=True)
+    os.chmod(log_dir, 0o700)
 
-    file_handler = TimedRotatingFileHandler(
+    file_handler = _RestrictedTimedRotatingFileHandler(
         filename=os.path.join(log_dir, "app.log"),
         when="midnight",       # 毎日0時にローテーション
         interval=1,
@@ -43,7 +54,7 @@ def _init_root_logger():
     logger.addHandler(file_handler)
 
     # --- エラーログ専用ハンドラ（ERROR以上のみ） ---
-    error_handler = TimedRotatingFileHandler(
+    error_handler = _RestrictedTimedRotatingFileHandler(
         filename=os.path.join(log_dir, "error.log"),
         when="midnight",
         interval=1,

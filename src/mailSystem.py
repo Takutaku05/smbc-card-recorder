@@ -32,8 +32,7 @@ TOKEN_FILE = os.path.join(BASE_DIR, "config", "gmailtoken.json")
 LAST_RUN_FILE = os.path.join(BASE_DIR, "config", "last_run_time.json")
 PROCESSED_IDS_FILE = os.path.join(BASE_DIR, "config", "processed_message_ids.json")
 SERVICE_ACCOUNT_FILE = os.getenv("SERVICE_ACCOUNT_FILE")
-SCOPES_SHEET = ['https://www.googleapis.com/auth/spreadsheets',
-                'https://www.googleapis.com/auth/drive']
+SCOPES_SHEET = ['https://www.googleapis.com/auth/spreadsheets']
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 
 # --- グローバル変数 ---
@@ -410,6 +409,34 @@ def timesheet(time):
     return f'{time_object.month}月'
 
 
+def _write_token_atomic(token_path, content):
+    """
+    OAuth トークンファイルを 0600 パーミッションでアトミックに書き込む。
+
+    :param token_path: 保存先ファイルパス
+    :type token_path: str
+    :param content: 書き込むJSON文字列
+    :type content: str
+    """
+    parent_dir = os.path.dirname(token_path)
+    if parent_dir:
+        os.makedirs(parent_dir, mode=0o700, exist_ok=True)
+        os.chmod(parent_dir, 0o700)
+
+    tmp_path = f"{token_path}.tmp"
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as token_file:
+            token_file.write(content)
+            token_file.flush()
+            os.fsync(token_file.fileno())
+        os.replace(tmp_path, token_path)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+
+
 def initialize_services():
     """
     Gmail API と Google Sheets API の認証を行い、クライアントを初期化する。
@@ -427,7 +454,11 @@ def initialize_services():
     # Gmail認証
     gmail_creds = None
     if os.path.exists(TOKEN_FILE):
-        gmail_creds = GmailCredentials.from_authorized_user_file(TOKEN_FILE, [SCOPES_GMAIL])
+        try:
+            gmail_creds = GmailCredentials.from_authorized_user_file(TOKEN_FILE, [SCOPES_GMAIL])
+        except (ValueError, OSError) as e:
+            logger.warning("保存済みGmailトークン '%s' の読み込みに失敗したため再認証を行います: %s", TOKEN_FILE, e)
+            gmail_creds = None
     
     if not gmail_creds or not gmail_creds.valid:
         if gmail_creds and gmail_creds.expired and gmail_creds.refresh_token:
@@ -449,8 +480,7 @@ def initialize_services():
                 logger.error("'config/credentials.json' が見つかりません。")
                 return False
         
-        with open(TOKEN_FILE, "w") as token:
-            token.write(gmail_creds.to_json())
+        _write_token_atomic(TOKEN_FILE, gmail_creds.to_json())
 
     try:
         gmail_service = build("gmail", "v1", credentials=gmail_creds)
