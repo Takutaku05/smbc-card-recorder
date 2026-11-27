@@ -582,7 +582,8 @@ def check_mail_job():
             new_messages_processed_count = 0
             logger.info("%d 件の候補メールが見つかりました。処理を開始します。", len(messages))
 
-            for message_info in messages:
+            # Gmail API は新着順(降順)で返すため、古い順(昇順)に処理してスプレッドシートの時系列を保つ
+            for message_info in reversed(messages):
                 message_id = message_info["id"]
                 
                 if message_id in processed_ids:
