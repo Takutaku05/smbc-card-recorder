@@ -334,22 +334,31 @@ def sheet(email_time, location, money):
             _worksheet_cache = {}
         else:
             spreadsheet = _cached_spreadsheet
-        is_complete_data = False
+        missing_fields = []
         if email_time == "N/A":
-            logger.warning("利用日が抽出できませんでした。")
-            mailDisco.MailDisco("⚠️ 利用日が抽出できませんでした。").send()
-            sheet_name = f'{datetime.datetime.now().month}月'
-        elif location == "N/A":
-            logger.warning("利用先が抽出できませんでした。")
-            mailDisco.MailDisco("⚠️ 利用先が抽出できませんでした。").send()
-            sheet_name = "Sheet1"
-        elif money == "N/A":
-            logger.warning("利用金額が抽出できませんでした。")
-            mailDisco.MailDisco("⚠️ 利用金額が抽出できませんでした。").send()
-            sheet_name = "Sheet1"
-        else:
-            sheet_name = timesheet(email_time)
-            is_complete_data = True
+            missing_fields.append("利用日")
+        if location == "N/A":
+            missing_fields.append("利用先")
+        if money == "N/A" or not isinstance(money, int):
+            missing_fields.append("利用金額")
+
+        if missing_fields:
+            missing_str = "・".join(missing_fields)
+            logger.warning(
+                "抽出に失敗した項目があるため書き込みを中止します (%s): 利用日=%s, 利用先=%s, 金額=%s",
+                missing_str,
+                email_time,
+                location,
+                money,
+            )
+            mailDisco.MailDisco(
+                f"⚠️ 以下の項目を抽出できなかったため記録を中止しました: {missing_str}\n"
+                f"利用日: {email_time} / 利用先: {location} / 金額: {money}"
+            ).send()
+            return False
+
+        is_complete_data = True
+        sheet_name = timesheet(email_time)
 
         actual_sheet_name = sheet_name
         used_fallback_sheet = False
