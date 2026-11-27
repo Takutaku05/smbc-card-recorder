@@ -315,35 +315,14 @@ def system(mes_body):
     :return: 書き込み成功時 True、失敗時 False、抽出失敗でスキップした場合 ``SHEET_SKIPPED``
     :rtype: bool | str
     """
-    utilization_datetime_match = re.search(
-        r"(?:利用日|ご利用日時)\s*[:：]?\s*(\d{4}[/-]\d{1,2}[/-]\d{1,2}[\s　]+\d{1,2}:\d{2}(?::\d{2})?)",
-        mes_body,
+    parsed = parse_mail_body(mes_body)
+    logger.info(
+        "抽出結果: 利用日=%s, 利用先=%s, 利用金額=%s",
+        parsed["datetime"],
+        parsed["location"],
+        parsed["amount"],
     )
-    if utilization_datetime_match:
-        raw_dt = utilization_datetime_match.group(1)
-        utilization_datetime = re.sub(r"[\s　]+", " ", raw_dt.strip()).replace("-", "/")
-    else:
-        utilization_datetime = "N/A"
-    utilization_location_match = re.search(r"(?:利用先|ご利用場所)\s*[:：]\s*([^\n]+)", mes_body)
-    utilization_location = utilization_location_match.group(1).strip() if utilization_location_match else "N/A"
-    utilization_amount_match = re.search(
-        r"ご?利用金額\s*[:：]?\s*([-−－▲△]?)\s*([\d,]+)\s*円",
-        mes_body,
-    )
-    utilization_amount = "N/A"
-    if utilization_amount_match:
-        sign_str, digits_str = utilization_amount_match.group(1), utilization_amount_match.group(2)
-        if re.fullmatch(r"\d{1,3}(?:,\d{3})*|\d+", digits_str):
-            parsed_amount = int(digits_str.replace(",", ""))
-            if sign_str in ("-", "−", "－", "▲", "△"):
-                parsed_amount = -parsed_amount
-            utilization_amount = parsed_amount
-        else:
-            logger.warning("金額 '%s%s' の書式が不正なため N/A として扱います。", sign_str, digits_str)
-    
-    logger.info("抽出結果: 利用日=%s, 利用先=%s, 利用金額=%s", utilization_datetime, utilization_location, utilization_amount)
-    
-    return sheet(utilization_datetime, utilization_location, utilization_amount)
+    return sheet(parsed["datetime"], parsed["location"], parsed["amount"])
 
 
 def sheet(email_time, location, money):
@@ -471,14 +450,9 @@ def sheet(email_time, location, money):
             return True
         
         # 3行目(index 2)以降でA〜D列がすべて空の行を探すロジック
-        for i, row in enumerate(all_values):
-            if i >= 2:
-                padded_row = (list(row) + ["", "", "", ""])[:4]
-                if not any(str(cell).strip() for cell in padded_row):
-                    target_row_index = i + 1
-                    break
+        target_row_index = find_target_row(all_values)
         
-        if target_row_index == -1: # A〜D列が空の行が見つからなかった場合
+        if target_row_index is None: # A〜D列が空の行が見つからなかった場合
             worksheet.append_row(data_to_log)
             logger.info("A〜D列が空の行が見つからなかったため、最終行にデータ '%s' が追加されました。", data_to_log)
             _notify_write_success("最終行")
@@ -535,6 +509,71 @@ def timesheet(time):
             return f'{datetime.datetime.now().month}月'
     
     return f'{time_object.month}月'
+
+
+def parse_mail_body(mes_body):
+    """
+    メール本文から利用日時・利用先・利用金額を抽出する純粋関数（外部I/Oなし）。
+
+    :param mes_body: 解析対象のメール本文テキスト
+    :type mes_body: str
+    :return: ``{"datetime": ..., "location": ..., "amount": ...}`` 形式の辞書
+    :rtype: dict[str, str | int]
+    """
+    utilization_datetime_match = re.search(
+        r"(?:利用日|ご利用日時)\s*[:：]?\s*(\d{4}[/-]\d{1,2}[/-]\d{1,2}[\s　]+\d{1,2}:\d{2}(?::\d{2})?)",
+        mes_body,
+    )
+    if utilization_datetime_match:
+        raw_dt = utilization_datetime_match.group(1)
+        utilization_datetime = re.sub(r"[\s　]+", " ", raw_dt.strip()).replace("-", "/")
+    else:
+        utilization_datetime = "N/A"
+
+    utilization_location_match = re.search(r"(?:利用先|ご利用場所)\s*[:：]\s*([^\n]+)", mes_body)
+    utilization_location = utilization_location_match.group(1).strip() if utilization_location_match else "N/A"
+
+    utilization_amount_match = re.search(
+        r"ご?利用金額\s*[:：]?\s*([-−－▲△]?)\s*([\d,]+)\s*円",
+        mes_body,
+    )
+    utilization_amount = "N/A"
+    if utilization_amount_match:
+        sign_str, digits_str = utilization_amount_match.group(1), utilization_amount_match.group(2)
+        if re.fullmatch(r"\d{1,3}(?:,\d{3})*|\d+", digits_str):
+            parsed_amount = int(digits_str.replace(",", ""))
+            if sign_str in ("-", "−", "－", "▲", "△"):
+                parsed_amount = -parsed_amount
+            utilization_amount = parsed_amount
+        else:
+            logger.warning("金額 '%s%s' の書式が不正なため N/A として扱います。", sign_str, digits_str)
+
+    return {
+        "datetime": utilization_datetime,
+        "location": utilization_location,
+        "amount": utilization_amount,
+    }
+
+
+def find_target_row(all_values, header_rows=2):
+    """
+    スプレッドシートのデータ行から A〜D 列すべてが空の最初の行番号（1始まり）を返す。
+
+    空き行が見つからない場合は ``None`` を返す。
+
+    :param all_values: ワークシートの全行データ
+    :type all_values: list[list]
+    :param header_rows: スキップするヘッダ行数（デフォルト: 2）
+    :type header_rows: int
+    :return: 書き込み先の1始まり行番号、または末尾追記を示す None
+    :rtype: int | None
+    """
+    for i, row in enumerate(all_values):
+        if i >= header_rows:
+            padded_row = (list(row) + ["", "", "", ""])[:4]
+            if not any(str(cell).strip() for cell in padded_row):
+                return i + 1
+    return None
 
 
 def _write_token_atomic(token_path, content):
