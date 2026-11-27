@@ -66,9 +66,25 @@ DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/your/webhook_url"
 * SPREADSHEET_IDの取得方法:
 GoogleスプレッドシートのURL https://docs.google.com/spreadsheets/d/[ここにある長い英数字]/edit の部分をコピーして設定します。
 * config/service_account.json:
-Google Cloud Consoleから取得したGoogle Sheets API用のサービスアカウントキーを `config` ディレクトリ内に配置します。
+Google Cloud Consoleから取得したGoogle Sheets API用のサービスアカウントキーを `config` ディレクトリ内に配置します（`config/service_account.json.example` を参考に作成）。
 * config/credentials.json:
-Gmail APIの初回ユーザー認証情報を `config` ディレクトリ内に配置してください。
+Gmail APIの初回ユーザー認証情報を `config` ディレクトリ内に配置してください（`config/credentials.json.example` を参考に作成）。
+* config/categories.csv:
+店舗名と用途カテゴリの対応表を配置します。まずはテンプレートをコピーして作成してください。
+```bash
+cp config/categories.csv.example config/categories.csv
+```
+1〜5行目の行順がそのままカテゴリに対応し、各行にカンマ区切りで店舗名を並べます（6行目以降は無視されます）。
+  * 1行目: 食費
+  * 2行目: 外食費
+  * 3行目: 生活雑貨
+  * 4行目: 交通費
+  * 5行目: その他
+
+### スプレッドシートの構成
+* **シート名:** 記録対象の月ごとに `1月` 〜 `12月` のシートを作成してください。該当月のシートが存在しない場合は `Sheet1` に書き込まれます（どちらのシートも存在しない場合は書き込みをスキップします）。
+* **列・行レイアウト:** 1〜2行目はヘッダ行として扱われ、3行目以降の `A:D` 列に `[利用日時, 利用先, 利用金額, 用途]` の順で記録されます。
+* **合計行の配置:** 空き行探索は3行目以降のA列を参照するため、合計行（`=SUM(...)` など）は1〜2行目のヘッダ領域やデータ範囲外の列（E列以降など）に配置してください。
 
 ### スプレッドシートの権限設定
 1. 書き込み先のスプレッドシートを開き、右上の「共有」ボタンをクリックします。
