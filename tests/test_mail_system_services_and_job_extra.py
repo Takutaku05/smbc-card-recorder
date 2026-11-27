@@ -13,10 +13,15 @@ from google.auth.transport.requests import Request
 from googleapiclient.errors import HttpError
 
 import src.mailSystem as mailSystem
-from tests.conftest import FixedDateTime, encode_b64url, make_fixed_datetime_namespace
+from tests.conftest import (
+    FixedDateTime,
+    encode_b64url,
+    expected_earliest_after,
+    make_fixed_datetime_namespace,
+)
 
 LOGGER = "smbc_card_recorder.src.mailSystem"
-QUERY = 'subject:"ご利用のお知らせ【三井住友カード】" -in:trash -in:spam'
+QUERY = 'subject:"ご利用のお知らせ【三井住友カード】" -in:trash -in:spam -in:sent -in:drafts'
 
 
 def _http_error(status=500):
@@ -84,14 +89,13 @@ class TestInitializeServicesExtra:
             encoding="utf-8"
         ) == '{"original": true}'
 
-    def test_valid_token_ignores_to_json_error_and_handles_webhook_or_no_backoff(
+    def test_valid_token_ignores_to_json_error_and_uses_bounded_backoff_client(
         self, tmp_path, monkeypatch
     ):
         self._token(tmp_path)
         creds = MagicMock(valid=True)
         creds.to_json.side_effect = RuntimeError("cannot serialize")
         monkeypatch.setenv("DISCORD_WEBHOOK_URL", "https://example.invalid/hook")
-        monkeypatch.setattr(mailSystem.gspread, "BackOffHTTPClient", None, raising=False)
         with (
             patch(
                 "src.mailSystem.GmailCredentials.from_authorized_user_file",
@@ -101,7 +105,8 @@ class TestInitializeServicesExtra:
             patch("src.mailSystem.gspread.service_account") as mock_sa,
         ):
             assert mailSystem.initialize_services() is True
-        assert "http_client" not in mock_sa.call_args.kwargs
+        # gspread 標準の BackOffHTTPClient（再試行回数が無制限）ではなく上限付きクライアントを使う
+        assert mock_sa.call_args.kwargs["http_client"] is mailSystem.BoundedBackOffHTTPClient
 
     def test_refresh_is_called_with_google_request_object(self, tmp_path):
         self._token(tmp_path)
@@ -377,7 +382,7 @@ class TestCheckMailJobExtra:
         assert not (tmp_path / "last_run_time.json").exists()
         assert not (tmp_path / "processed_message_ids.json").exists()
 
-    def test_list_and_get_use_expected_arguments_and_retries(self):
+    def test_list_and_get_use_expected_arguments_and_retries(self, pinned_job_now):
         gmail = _gmail(["m1"])
         mailSystem.gmail_service = gmail
         mailSystem.gc = MagicMock()
@@ -385,7 +390,9 @@ class TestCheckMailJobExtra:
             mailSystem.check_mail_job()
 
         gmail.users().messages().list.assert_called_once_with(
-            userId="me", q=QUERY, maxResults=500
+            userId="me",
+            q=f"{QUERY} after:{expected_earliest_after(pinned_job_now)}",
+            maxResults=500,
         )
         gmail.users().messages().list().execute.assert_called_once_with(num_retries=3)
         gmail.users().messages().get.assert_called_once_with(
@@ -406,7 +413,7 @@ class TestCheckMailJobExtra:
             mailSystem.check_mail_job()
         req.execute.assert_called_once_with(num_retries=3)
 
-    def test_after_timestamp_is_integer_epoch_seconds_with_overlap(self):
+    def test_after_timestamp_is_integer_epoch_seconds_with_overlap(self, pinned_job_now):
         last = datetime.datetime(2026, 11, 20, 12, 0, 0, 987654, tzinfo=datetime.timezone.utc)
         mailSystem.save_current_run_time(last)
         gmail = _gmail([])
@@ -418,7 +425,7 @@ class TestCheckMailJobExtra:
         assert q == f"{QUERY} after:{expected}"
         assert "." not in q.split("after:")[1]
 
-    def test_timezone_aware_last_run_time_uses_absolute_epoch_minus_overlap(self):
+    def test_timezone_aware_last_run_time_uses_absolute_epoch_minus_overlap(self, pinned_job_now):
         jst = datetime.timezone(datetime.timedelta(hours=9))
         last = datetime.datetime(2026, 11, 20, 21, 0, 0, tzinfo=jst)
         mailSystem.save_current_run_time(last)
@@ -601,13 +608,13 @@ class TestCheckMailJobExtra:
         assert "新しい未処理メールはありませんでした（処理済みを除く）。" in messages
         assert not any("件の新しいメールの処理が完了しました" in m for m in messages)
 
-    def test_logs_search_mode_first_run_vs_incremental(self, caplog):
+    def test_logs_search_mode_first_run_vs_incremental(self, caplog, pinned_job_now):
         mailSystem.gmail_service = _gmail([])
         mailSystem.gc = MagicMock()
         with caplog.at_level(logging.INFO, logger=LOGGER):
             mailSystem.check_mail_job()
         assert (
-            "初回チェックまたは日時不明。対象件名の全メールを検索候補とします。"
+            f"初回チェックまたは日時不明。直近 {mailSystem.SEARCH_WINDOW_DAYS} 日分の対象メールを検索候補とします。"
             in caplog.text
         )
 
@@ -658,7 +665,7 @@ class TestCheckMailJobExtra:
         ):
             mailSystem.check_mail_job()
         assert (
-            "メールID e の本文が見つかりませんでした。処理済みに登録せずスキップします。"
+            f"メールID e の処理に失敗しました (1/{mailSystem.MAX_MESSAGE_ATTEMPTS}回目): 本文を取得できませんでした"
             in caplog.text
         )
 

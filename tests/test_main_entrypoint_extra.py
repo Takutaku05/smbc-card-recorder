@@ -83,16 +83,39 @@ class TestMainEntrypointExtra:
         result["sleep"].assert_not_called()
         assert schedule_mod.jobs == []
 
-    def test_sigterm_handler_saves_state_notifies_and_exits_zero(self, tmp_path):
+    def test_sigterm_handler_only_sets_flag_without_io(self, tmp_path):
+        """シグナルハンドラ内では状態保存・通知・例外送出を行わず、停止要求フラグを立てるだけ。"""
         mailSystem.processed_ids = {"sigterm_msg"}
         with (
             patch("src.mailSystem.mailDisco.MailDisco") as mock_disco,
-            pytest.raises(SystemExit) as exc_info,
+            patch.object(mailSystem, "save_processed_ids") as mock_save,
         ):
             mailSystem._handle_sigterm(signal.SIGTERM, None)
-        assert exc_info.value.code == 0
-        mock_disco.assert_called_once_with("--- メール監視システムを停止しました ---")
-        saved = json.loads(
-            (tmp_path / "processed_message_ids.json").read_text(encoding="utf-8")
-        )
-        assert "sigterm_msg" in saved
+        assert mailSystem._shutdown_requested is True
+        mock_disco.assert_not_called()
+        mock_save.assert_not_called()
+        assert not (tmp_path / "processed_message_ids.json").exists()
+
+    def test_sigterm_in_main_loop_stops_gracefully_saves_state_and_notifies(self):
+        calls = {"n": 0}
+
+        def _on_sleep(_seconds):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                # runpy で実行中の __main__ 名前空間に登録されたハンドラを呼ぶ（= SIGTERM 受信）
+                signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+
+        result = _run_main(on_sleep=_on_sleep)
+
+        # 1回目: 初回実行後の sleep、2回目: ループ内の sleep（ここで SIGTERM）→ ループを抜ける
+        assert result["sleep"].call_count == 2
+        assert result["run_pending"].call_count == 1
+        assert result["disco_messages"][-1] == "--- メール監視システムを停止しました ---"
+        # 停止時は systemd の停止タイムアウトを超えないよう 429 を再試行しない
+        assert result["disco_cls"].call_args_list[-1].kwargs == {"max_retries": 0}
+        writes = [e[1] for e in result["events"] if e[0] == "write"]
+        assert writes[-2:] == ["processed_message_ids.json", "failed_message_attempts.json"]
+
+    def test_failure_counts_are_loaded_at_startup(self):
+        result = _run_main(json_files={"failed_message_attempts.json": json.dumps({"m": 2})})
+        assert ("read", "failed_message_attempts.json") in result["events"]

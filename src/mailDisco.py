@@ -96,7 +96,12 @@ class DiscordNotifier:
         :return: 送信に成功した場合 True、失敗またはスキップ時は False
         :rtype: bool
         """
-        webhook_url = self.webhook_url or os.getenv("DISCORD_WEBHOOK_URL")
+        # 明示的に webhook_url="" を渡した場合は環境変数へフォールバックせず通知を無効化する
+        webhook_url = (
+            self.webhook_url
+            if self.webhook_url is not None
+            else os.getenv("DISCORD_WEBHOOK_URL")
+        )
 
         if not webhook_url:
             logger.warning("環境変数 'DISCORD_WEBHOOK_URL' が設定されていません。Discord通知をスキップします。")
@@ -139,7 +144,13 @@ class MailDisco:
     :ivar str message: 送信するメッセージの内容
     """
 
-    def __init__(self, message, webhook_url=None, session=None):
+    def __init__(
+        self,
+        message,
+        webhook_url=None,
+        session=None,
+        max_retries=DEFAULT_MAX_RETRIES,
+    ):
         """
         MailDisco クラスのインスタンスを初期化する。
 
@@ -149,9 +160,13 @@ class MailDisco:
         :type webhook_url: str | None
         :param session: 再利用する requests.Session インスタンス
         :type session: requests.Session | None
+        :param max_retries: HTTP 429 応答時の最大リトライ回数（停止時など待てない場面では 0 を指定）
+        :type max_retries: int
         """
         self.message = message
-        self._notifier = DiscordNotifier(webhook_url=webhook_url, session=session)
+        self._notifier = DiscordNotifier(
+            webhook_url=webhook_url, session=session, max_retries=max_retries
+        )
 
     def send(self):
         """

@@ -39,12 +39,15 @@ def reset_global_state(monkeypatch, tmp_path):
     monkeypatch.setattr(mailSystem, "TOKEN_FILE", str(tmp_path / "gmailtoken.json"))
     monkeypatch.setattr(mailSystem, "LAST_RUN_FILE", str(tmp_path / "last_run_time.json"))
     monkeypatch.setattr(mailSystem, "PROCESSED_IDS_FILE", str(tmp_path / "processed_message_ids.json"))
+    monkeypatch.setattr(mailSystem, "FAILED_ATTEMPTS_FILE", str(tmp_path / "failed_message_attempts.json"))
     monkeypatch.setattr(mailSystem, "SPREADSHEET_ID", "test-spreadsheet-id")
     monkeypatch.setattr(mailSystem, "SERVICE_ACCOUNT_FILE", str(tmp_path / "service_account.json"))
     monkeypatch.setattr(mailSystem, "gc", None)
     monkeypatch.setattr(mailSystem, "gmail_service", None)
     monkeypatch.setattr(mailSystem, "processed_ids", set())
     monkeypatch.setattr(mailSystem, "_processed_id_timestamps", {})
+    monkeypatch.setattr(mailSystem, "_message_failure_counts", {})
+    monkeypatch.setattr(mailSystem, "_shutdown_requested", False)
     monkeypatch.setattr(mailSystem, "_cached_gc", None)
     monkeypatch.setattr(mailSystem, "_cached_spreadsheet_id", None)
     monkeypatch.setattr(mailSystem, "_cached_spreadsheet", None)
@@ -98,8 +101,28 @@ def fixed_now(monkeypatch):
     return FixedDateTime.fixed_now
 
 
+@pytest.fixture
+def pinned_job_now(monkeypatch):
+    """
+    check_mail_job の基準時刻を 2026-11-27 09:30:00 UTC に固定する。
+
+    Gmail 検索範囲は「現在時刻 - SEARCH_WINDOW_DAYS」で下限が切られるため、固定日付の
+    last_run_time を使うテストが実時間の経過で失敗しない（タイムボムにならない）ようにする。
+    """
+    monkeypatch.setattr(mailSystem, "datetime", make_fixed_datetime_namespace())
+    monkeypatch.setattr(FixedDateTime, "fixed_now", datetime.datetime(2026, 11, 27, 9, 30, 0))
+    return datetime.datetime(2026, 11, 27, 9, 30, 0, tzinfo=datetime.timezone.utc)
+
+
+def expected_earliest_after(now_utc):
+    """検索範囲の下限（after: に入る epoch 秒）を返す。"""
+    return int((now_utc - datetime.timedelta(days=mailSystem.SEARCH_WINDOW_DAYS)).timestamp())
+
+
 # __main__ ブロック実行時に読み書きされる状態ファイル（config/ 配下）
-STATE_FILES = frozenset({"gmailtoken.json", "last_run_time.json", "processed_message_ids.json"})
+STATE_FILES = frozenset(
+    {"gmailtoken.json", "last_run_time.json", "processed_message_ids.json", "failed_message_attempts.json"}
+)
 
 
 def run_main_block(
@@ -108,6 +131,7 @@ def run_main_block(
     init_ok=True,
     sleep_effects=(None, KeyboardInterrupt),
     gmail=None,
+    on_sleep=None,
 ):
     """
     src/mailSystem.py の __main__ ブロックを一時ディレクトリ隔離のもと安全に実行するヘルパー。
@@ -207,7 +231,10 @@ def run_main_block(
                     "schedule.run_pending",
                     side_effect=lambda: events.append(("run_pending", None)),
                 ) as run_pending,
-                patch("time.sleep", side_effect=list(sleep_effects)) as sleep,
+                patch(
+                    "time.sleep",
+                    side_effect=on_sleep if on_sleep is not None else list(sleep_effects),
+                ) as sleep,
             ):
                 runpy.run_path(real_mail_system_file, run_name="__main__")
         finally:

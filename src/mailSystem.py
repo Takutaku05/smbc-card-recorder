@@ -33,9 +33,19 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOKEN_FILE = os.path.join(BASE_DIR, "config", "gmailtoken.json")
 LAST_RUN_FILE = os.path.join(BASE_DIR, "config", "last_run_time.json")
 PROCESSED_IDS_FILE = os.path.join(BASE_DIR, "config", "processed_message_ids.json")
+FAILED_ATTEMPTS_FILE = os.path.join(BASE_DIR, "config", "failed_message_attempts.json")
 PROCESSED_IDS_MAX_ENTRIES = 2000
 PROCESSED_IDS_RETENTION_DAYS = 90
+# Gmail 検索範囲の上限（日数）。処理済みIDの保持日数より短くし、パージ済みIDのメールが
+# 再検索されて二重記録されることを防ぐ（処理時刻 >= メール受信時刻のため、この範囲のメールのIDは必ず保持されている）
+SEARCH_WINDOW_DAYS = PROCESSED_IDS_RETENTION_DAYS - 1
+# 同一メールの処理失敗をこの回数まで再試行し、超えたら処理済みにして再試行・通知を止める（30分間隔で約3時間）
+MAX_MESSAGE_ATTEMPTS = 6
+GMAIL_QUERY_BASE = 'subject:"ご利用のお知らせ【三井住友カード】" -in:trash -in:spam -in:sent -in:drafts'
 _processed_id_timestamps = {}
+_message_failure_counts = {}
+# SIGTERM 受信時に立てる停止要求フラグ（シグナルハンドラ内では I/O を行わない）
+_shutdown_requested = False
 
 
 def _resolve_config_path(file_path):
@@ -70,6 +80,55 @@ _refresh_error_notified = False
 
 # sheet() の戻り値: 抽出失敗(N/A)のため記録をスキップした（再試行しても結果が変わらないため処理済み扱いにする）
 SHEET_SKIPPED = "skipped"
+
+
+class BoundedBackOffHTTPClient(gspread.http_client.HTTPClient):
+    """
+    再試行回数に上限を設けた gspread 用 HTTP クライアント。
+
+    gspread 標準の ``BackOffHTTPClient`` は再試行回数に上限がなく、Sheets API が
+    5xx を返し続けるとジョブが停止し続けるため、本クラスで置き換える。
+
+    * 429（レート制限）: リクエストは処理されていないため、メソッドを問わず再試行する。
+    * 408 / 5xx: サーバー側で書き込み済みの可能性があるため、冪等なメソッド（GET / PUT 等）のみ再試行する
+      （``append_row`` の POST を再試行すると同じ行が二重追加され得る）。
+    """
+
+    MAX_RETRIES = 5
+    BASE_WAIT_SECONDS = 2
+    MAX_WAIT_SECONDS = 32
+    _IDEMPOTENT_METHODS = frozenset({"get", "head", "options", "put", "delete"})
+
+    @classmethod
+    def _should_retry(cls, method, code):
+        if code == 429:
+            return True
+        if code == 408 or code >= 500:
+            return str(method).lower() in cls._IDEMPOTENT_METHODS
+        return False
+
+    def request(self, method, endpoint, *args, **kwargs):
+        attempt = 0
+        while True:
+            try:
+                return super().request(method, endpoint, *args, **kwargs)
+            except gspread.exceptions.APIError as err:
+                if attempt >= self.MAX_RETRIES or not self._should_retry(
+                    method, err.code
+                ):
+                    raise
+                wait_seconds = min(
+                    self.BASE_WAIT_SECONDS * (2**attempt), self.MAX_WAIT_SECONDS
+                )
+                attempt += 1
+                logger.warning(
+                    "Sheets API がエラー (%s) を返しました。%d秒後に再試行します (%d/%d)。",
+                    err.code,
+                    wait_seconds,
+                    attempt,
+                    self.MAX_RETRIES,
+                )
+                time.sleep(wait_seconds)
 
 
 def _extract_charset(part):
@@ -147,6 +206,9 @@ def _html_to_text(html_body):
     text = re.sub(
         r"<script\b[^>]*>.*?</script>", "", text, flags=re.IGNORECASE | re.DOTALL
     )
+    # HTML ソース上の改行・インデントは表示に影響しないため空白1つへ正規化し、
+    # 整形済みテーブル（<td>ご利用場所：</td>\n  <td>店名</td>）で項目名と値が別行に分かれないようにする
+    text = re.sub(r"\s+", " ", text)
     text = re.sub(r"<br\s*/?>|</tr>|</p>|</div>|</li>", "\n", text, flags=re.IGNORECASE)
     text = re.sub(r"</t[dh]>", " ", text, flags=re.IGNORECASE)
     text = re.sub(r"<[^>]+>", "", text)
@@ -193,12 +255,14 @@ def _extract_body_parts(payload):
     if payload.get("filename"):
         return "", ""
 
-    data = payload.get("body", {}).get("data")
+    data = (payload.get("body") or {}).get("data")
     if not data:
         return "", ""
 
+    # 本文として扱うのは text/plain（mimeType 未指定を含む）と text/html のみ。
+    # text/calendar・text/csv 等の補助パートを本文として先取りしないようスキップする
     mime_type = (payload.get("mimeType") or "").lower()
-    if mime_type and not mime_type.startswith("text/"):
+    if mime_type not in ("", "text/plain", "text/html"):
         return "", ""
 
     decoded = decode_base64_url_safe(data, charset=_extract_charset(payload))
@@ -394,6 +458,90 @@ def save_processed_ids():
         _atomic_write_json(PROCESSED_IDS_FILE, _processed_id_timestamps)
     except OSError as e:
         logger.error("処理済みメールIDの保存中にエラーが発生しました: %s", e)
+
+
+def load_message_failure_counts():
+    """
+    メールごとの連続処理失敗回数をファイルから読み込み、``_message_failure_counts`` を更新する。
+
+    ファイルが存在しない・破損している場合は空の状態から開始する（失敗回数のリセットのみで実害はない）。
+    """
+    global _message_failure_counts
+    _message_failure_counts = {}
+    if not os.path.exists(FAILED_ATTEMPTS_FILE):
+        return
+    try:
+        with open(FAILED_ATTEMPTS_FILE, "r", encoding="utf-8") as f:
+            raw_data = json.load(f)
+        if not isinstance(raw_data, dict):
+            raise TypeError("failed_message_attempts.json の形式が不正です。")
+        _message_failure_counts = {
+            str(mid): int(count) for mid, count in raw_data.items()
+        }
+    except (json.JSONDecodeError, TypeError, ValueError, OSError) as e:
+        logger.warning(
+            "処理失敗回数ファイル '%s' が不正なため初期化します: %s",
+            FAILED_ATTEMPTS_FILE,
+            e,
+        )
+        _message_failure_counts = {}
+
+
+def save_message_failure_counts():
+    """メールごとの連続処理失敗回数をJSONファイルへ保存する。"""
+    try:
+        _atomic_write_json(FAILED_ATTEMPTS_FILE, _message_failure_counts)
+    except OSError as e:
+        logger.error("処理失敗回数の保存中にエラーが発生しました: %s", e)
+
+
+def _record_message_failure(message_id, subject, reason, notify_first=True):
+    """
+    メールの処理失敗を記録し、上限回数に達した場合は処理済みにして再試行を打ち切る。
+
+    初回の失敗時と打ち切り時のみ Discord に通知し、30分ごとの重複通知を抑止する。
+
+    :param message_id: GmailメッセージID
+    :type message_id: str
+    :param subject: メール件名（通知用）
+    :type subject: str
+    :param reason: 失敗理由（通知用）
+    :type reason: str
+    :param notify_first: 初回失敗時に通知するか（呼び出し元で詳細通知済みの場合は False）
+    :return: 再試行を打ち切って処理済みにした場合 True、次回再試行する場合 False
+    :rtype: bool
+    """
+    count = _message_failure_counts.get(message_id, 0) + 1
+    if count >= MAX_MESSAGE_ATTEMPTS:
+        _message_failure_counts.pop(message_id, None)
+        processed_ids.add(message_id)
+        save_processed_ids()
+        logger.error(
+            "メールID %s は %d 回連続で処理に失敗したため、再試行を打ち切り処理済みにしました。",
+            message_id,
+            count,
+        )
+        mailDisco.MailDisco(
+            f"❌ メールID {message_id}（件名: {subject}）は {count} 回連続で処理に失敗したため、"
+            f"再試行を打ち切りました。\n最後の失敗理由: {reason}\n"
+            "Gmail で該当メールを確認し、必要に応じて手動で記録してください。"
+        ).send()
+        return True
+
+    _message_failure_counts[message_id] = count
+    logger.warning(
+        "メールID %s の処理に失敗しました (%d/%d回目): %s",
+        message_id,
+        count,
+        MAX_MESSAGE_ATTEMPTS,
+        reason,
+    )
+    if count == 1 and notify_first:
+        mailDisco.MailDisco(
+            f"⚠️ メールID {message_id}（件名: {subject}）の処理に失敗しました: {reason}\n"
+            f"次回以降も再試行し、{MAX_MESSAGE_ATTEMPTS} 回連続で失敗した場合は打ち切ります。"
+        ).send()
+    return False
 
 
 def system(mes_body):
@@ -724,7 +872,15 @@ def _write_token_atomic(token_path, content):
     parent_dir = os.path.dirname(token_path)
     if parent_dir:
         os.makedirs(parent_dir, mode=0o700, exist_ok=True)
-        os.chmod(parent_dir, 0o700)
+        try:
+            os.chmod(parent_dir, 0o700)
+        except OSError as e:
+            # 過去に sudo 実行した等で所有者が異なる場合でも、トークン自体は 0600 で保存して続行する
+            logger.warning(
+                "ディレクトリ '%s' の権限を 0700 に変更できませんでした: %s",
+                parent_dir,
+                e,
+            )
 
     tmp_path = f"{token_path}.tmp"
     fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -857,8 +1013,12 @@ def initialize_services():
                 return False
 
         token_json = gmail_creds.to_json()
-        _write_token_atomic(TOKEN_FILE, token_json)
-        _last_saved_token_json = token_json
+        try:
+            _write_token_atomic(TOKEN_FILE, token_json)
+            _last_saved_token_json = token_json
+        except OSError as e:
+            # 所有者違い等で保存できなくてもメモリ上のトークンで稼働を続ける（次回トークン更新時に再保存を試みる）
+            logger.error("Gmailトークンの保存に失敗しました: %s", e)
 
     try:
         gmail_service = build("gmail", "v1", credentials=gmail_creds)
@@ -897,11 +1057,11 @@ def initialize_services():
                 "環境変数 'DISCORD_WEBHOOK_URL' が設定されていません。Discord通知は無効の状態で稼働します。"
             )
 
-        sa_kwargs = {"filename": SERVICE_ACCOUNT_FILE, "scopes": SCOPES_SHEET}
-        backoff_client = getattr(gspread, "BackOffHTTPClient", None)
-        if backoff_client is not None:
-            sa_kwargs["http_client"] = backoff_client
-        gc = gspread.service_account(**sa_kwargs)
+        gc = gspread.service_account(
+            filename=SERVICE_ACCOUNT_FILE,
+            scopes=SCOPES_SHEET,
+            http_client=BoundedBackOffHTTPClient,
+        )
         spreadsheet = gc.open_by_key(SPREADSHEET_ID)
         _cached_gc = gc
         _cached_spreadsheet_id = SPREADSHEET_ID
@@ -961,22 +1121,39 @@ def check_mail_job():
     current_check_time = datetime.datetime.now(datetime.timezone.utc)
     last_check_time = get_last_run_time()
 
-    # Gmail検索クエリに対象の件名を追加（アーカイブ済みも含め、ゴミ箱・迷惑メールは除外）
-    query = 'subject:"ご利用のお知らせ【三井住友カード】" -in:trash -in:spam'
+    # Gmail検索クエリ（アーカイブ済みも含め、ゴミ箱・迷惑メール・送信済み・下書きは除外）。
+    # 送信済み・下書きを除外しないと、通知メールの転送（Fwd:）や返信の引用本文が二重記録される
+    query = GMAIL_QUERY_BASE
+    # 検索範囲は処理済みIDの保持期間内に限定する。last_run_time の欠損や長期凍結時に、
+    # 保持期間を過ぎてIDがパージされた過去メールを再取得して二重記録しないため
+    earliest_timestamp = int(
+        (current_check_time - datetime.timedelta(days=SEARCH_WINDOW_DAYS)).timestamp()
+    )
     if last_check_time:
         query_timestamp = max(
-            0, int(last_check_time.timestamp()) - LAST_RUN_OVERLAP_SECONDS
+            earliest_timestamp,
+            int(last_check_time.timestamp()) - LAST_RUN_OVERLAP_SECONDS,
         )
-        query += f" after:{query_timestamp}"
-        logger.info(
-            "最終チェック日時 (%s) 以降を検索 (after:%d)。",
-            last_check_time.isoformat(),
-            query_timestamp,
-        )
+        if query_timestamp == earliest_timestamp:
+            logger.warning(
+                "最終チェック日時 (%s) が検索範囲の上限 (%d日) より古いため、直近 %d 日分のみ検索します。",
+                last_check_time.isoformat(),
+                SEARCH_WINDOW_DAYS,
+                SEARCH_WINDOW_DAYS,
+            )
+        else:
+            logger.info(
+                "最終チェック日時 (%s) 以降を検索 (after:%d)。",
+                last_check_time.isoformat(),
+                query_timestamp,
+            )
     else:
+        query_timestamp = earliest_timestamp
         logger.info(
-            "初回チェックまたは日時不明。対象件名の全メールを検索候補とします。"
+            "初回チェックまたは日時不明。直近 %d 日分の対象メールを検索候補とします。",
+            SEARCH_WINDOW_DAYS,
         )
+    query += f" after:{query_timestamp}"
 
     try:
         messages = []
@@ -997,6 +1174,8 @@ def check_mail_job():
                 break
 
         had_failure = False
+        interrupted = False
+        failure_counts_changed = False
 
         if not messages:
             logger.info("新しい対象メールは見つかりませんでした。")
@@ -1008,12 +1187,23 @@ def check_mail_job():
 
             # Gmail API は新着順(降順)で返すため、古い順(昇順)に処理してスプレッドシートの時系列を保つ
             for message_info in reversed(messages):
+                if _shutdown_requested:
+                    # 1通単位の処理（書き込み→処理済み登録）を終えた区切りで停止し、重複記録を防ぐ
+                    interrupted = True
+                    logger.info(
+                        "停止要求を受信したため、残りのメール処理を中断します。"
+                    )
+                    break
+
                 message_id = message_info["id"]
 
                 if message_id in processed_ids:
                     continue
 
                 logger.info("処理中のメールID: %s", message_id)
+                subject = "取得前"
+                failure_reason = None
+                notify_first = True
                 try:
                     msg_detail = (
                         gmail_service.users()
@@ -1053,45 +1243,44 @@ def check_mail_job():
                                 message_id,
                             )
                         else:
-                            had_failure = True
-                            logger.error(
-                                "メールID %s のスプレッドシート書き込みに失敗したため、処理済みに登録しません。",
-                                message_id,
+                            # 失敗内容（利用先・金額・エラー）は sheet() 内で通知済みのため、ここでは重複通知しない
+                            failure_reason = (
+                                "スプレッドシートへの書き込みに失敗しました"
                             )
-                            mailDisco.MailDisco(
-                                f"❌ メールID {message_id} のスプレッドシート書き込みに失敗しました。処理済みには登録せずスキップします。"
-                            ).send()
+                            notify_first = False
                     else:
-                        had_failure = True
-                        logger.warning(
-                            "メールID %s の本文が見つかりませんでした。処理済みに登録せずスキップします。",
-                            message_id,
-                        )
-                        mailDisco.MailDisco(
-                            f"⚠️ メールID {message_id} の本文を取得できなかったためスキップしました（処理済み未登録）。"
-                        ).send()
+                        failure_reason = "本文を取得できませんでした"
 
                 except RefreshError:
                     raise
                 except HttpError as e_msg_get:
-                    had_failure = True
                     logger.error(
                         "メールID %s の詳細取得中にエラー: %s", message_id, e_msg_get
                     )
-                    mailDisco.MailDisco(
-                        f"❌ メールID {message_id} の取得中にエラーが発生しました。次回再試行するため最終チェック時刻を更新しません。"
-                    ).send()
+                    failure_reason = (
+                        f"メールの取得中にエラーが発生しました ({e_msg_get})"
+                    )
                 except Exception as e_proc:
-                    had_failure = True
                     logger.error(
                         "メールID %s の処理中に予期せぬエラー: %s",
                         message_id,
                         e_proc,
                         exc_info=True,
                     )
-                    mailDisco.MailDisco(
-                        f"❌ メールID {message_id} の処理中に予期せぬエラーが発生しました。次回再試行するため最終チェック時刻を更新しません。"
-                    ).send()
+                    failure_reason = f"処理中に予期せぬエラーが発生しました ({e_proc})"
+
+                if failure_reason is None:
+                    if _message_failure_counts.pop(message_id, None) is not None:
+                        failure_counts_changed = True
+                else:
+                    failure_counts_changed = True
+                    gave_up = _record_message_failure(
+                        message_id, subject, failure_reason, notify_first=notify_first
+                    )
+                    if gave_up:
+                        saved_in_loop = True
+                    else:
+                        had_failure = True
 
             if new_messages_processed_count > 0:
                 logger.info(
@@ -1101,12 +1290,18 @@ def check_mail_job():
             else:
                 logger.info("新しい未処理メールはありませんでした（処理済みを除く）。")
 
-        if not had_failure:
-            save_current_run_time(current_check_time)
-        else:
+        if had_failure:
             logger.warning(
                 "処理に失敗したメールがあるため、last_run_time を更新せず次回再試行します。"
             )
+        elif interrupted:
+            logger.warning(
+                "処理を中断したため、last_run_time を更新せず次回再開します。"
+            )
+        else:
+            save_current_run_time(current_check_time)
+        if failure_counts_changed:
+            save_message_failure_counts()
         if not saved_in_loop:
             save_processed_ids()
         _persist_refreshed_token_if_needed()
@@ -1119,9 +1314,11 @@ def check_mail_job():
             "Gmail API呼び出し中にエラーが発生しました: %s", error, exc_info=True
         )
         mailDisco.MailDisco("❌ Gmail API呼び出し中にエラーが発生しました").send()
+        _persist_refreshed_token_if_needed()
     except Exception as e:
         logger.error("ジョブ実行で予期せぬエラーが発生しました: %s", e, exc_info=True)
         mailDisco.MailDisco("ジョブ実行で予期せぬエラーが発生しました").send()
+        _persist_refreshed_token_if_needed()
 
     logger.info(
         "--- %s: メールチェック完了 ---",
@@ -1131,17 +1328,31 @@ def check_mail_job():
 
 # --- メインの実行ブロック ---
 def _handle_sigterm(_signum, _frame):
-    """SIGTERM 受信時に処理済みIDを保存し、停止通知を送って終了する。"""
-    logger.info("SIGTERMを受信しました。状態を保存してプログラムを停止します。")
+    """
+    SIGTERM 受信時に停止要求フラグを立てる。
+
+    シグナルハンドラ内でファイル保存・ログ出力・HTTP 通信を行うと、割り込まれた処理
+    （シート書き込み直後の処理済み登録、``.tmp`` 経由の状態保存、共有 Session）と競合するため、
+    実際の状態保存・停止通知はメインループ側の :func:`_shutdown` で行う。
+    """
+    global _shutdown_requested
+    _shutdown_requested = True
+
+
+def _shutdown():
+    """状態を保存し、停止通知を送る（systemd の停止タイムアウトを超えないよう 429 は再試行しない）。"""
     save_processed_ids()
-    mailDisco.MailDisco("--- メール監視システムを停止しました ---").send()
-    raise SystemExit(0)
+    save_message_failure_counts()
+    mailDisco.MailDisco(
+        "--- メール監視システムを停止しました ---", max_retries=0
+    ).send()
 
 
 if __name__ == "__main__":
     signal.signal(signal.SIGTERM, _handle_sigterm)
 
     load_processed_ids()  # 最初に処理済みIDをロード
+    load_message_failure_counts()
 
     if initialize_services():  # サービス初期化
         logger.info("サービス初期化完了。スケジューラーを開始します。")
@@ -1164,13 +1375,13 @@ if __name__ == "__main__":
 
             logger.info("初回実行完了。")
 
-            while True:
+            while not _shutdown_requested:
                 schedule.run_pending()
                 time.sleep(1)
+            logger.info("SIGTERMを受信したため、状態を保存してプログラムを停止します。")
         except KeyboardInterrupt:
             logger.info("プログラムを停止しました。")
-            save_processed_ids()
-            mailDisco.MailDisco("--- メール監視システムを停止しました ---").send()
+        _shutdown()
 
     else:
         logger.error("サービスの初期化に失敗したため、プログラムを終了します。")

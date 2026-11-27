@@ -12,7 +12,7 @@ class Purpose:
     利用場所（店名）に基づき、外部CSVファイルを使用して用途カテゴリを分類するクラス。
 
     ``categories.csv`` を読み込み、行番号に基づいて以下の順序でカテゴリを割り当てる
-    （1行目が ``store,category`` ヘッダの場合は2列形式として読み込む）。
+    （空行も1行として数える。最初の非空行が ``store,category`` ヘッダの場合は2列形式として読み込む）。
 
     1. 食費
     2. 外食費
@@ -87,9 +87,9 @@ class Purpose:
         """
         CSVファイルを読み込み、店名とカテゴリのマッピング辞書を作成する（クラスメソッド）。
 
-        ``config/categories.csv`` を UTF-8（BOM付き含む）または CP932 で読み込み、
-        空行をスキップしたうえでマッピングを構築する。
-        1行目が ``store,category`` のヘッダ行であれば2列形式、そうでなければ従来の行順形式で読み込む。
+        ``config/categories.csv`` を UTF-8（BOM付き含む）または CP932 で読み込み、マッピングを構築する。
+        最初の非空行が ``store,category`` のヘッダ行であれば2列形式（空行は無視）、
+        そうでなければ従来の行順形式（空行も1行として数え、行番号＝カテゴリを維持）で読み込む。
         読み込み失敗時はキャッシュを ``None`` に保ち、次回インスタンス化時に再試行できるようにする。
 
         :return: なし
@@ -138,10 +138,14 @@ class Purpose:
                     if store_name and category:
                         new_map[cls._normalize(store_name)] = category
             else:
-                for category_idx, row in enumerate(non_empty_rows):
+                # 行順形式では空行も「店舗未登録のカテゴリ」として行位置を維持する
+                # （空行を詰めると、以降の全カテゴリが1つずつ繰り上がって誤分類されるため）
+                for category_idx, row in enumerate(rows):
+                    is_empty_row = not row or not any(cell.strip() for cell in row)
                     # 行番号が定義数を超えていたら無視（または拡張）
                     if category_idx >= len(cls.CATEGORY_ORDER):
-                        logger.warning("%d行目のデータはカテゴリ定義がないためスキップされました: %s", category_idx + 1, row)
+                        if not is_empty_row:
+                            logger.warning("%d行目のデータはカテゴリ定義がないためスキップされました: %s", category_idx + 1, row)
                         continue
 
                     category = cls.CATEGORY_ORDER[category_idx]

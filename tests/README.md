@@ -25,6 +25,7 @@ PR と `main` / `develop` への push では `.github/workflows/tests.yml` が P
 | `test_purpose.py` / `test_mail_disco.py` / `test_logger_config.py` / `test_support_modules_extra.py` | 補助モジュール（NFKC/部分一致/BOM/CP932、429リトライ/2000文字制限、0600ログ権限） |
 | `test_config_contracts.py` | 定数・最小権限スコープ・環境変数名・設定サンプル・`.gitignore` の契約 |
 | `test_issue13_*.py` 〜 `test_issue35_*.py` | 各 Issue（#13〜#17, #19〜#25, #27, #29, #30, #32〜#35）の個別回帰テスト |
+| `test_pr58_review_fixes.py` | PR #58 レビュー指摘への対応（Sheets 再試行上限、送信済み・下書き除外と検索範囲の上限、失敗メールの再試行打ち切り、SIGTERM の安全な停止、整形済み HTML、権限変更失敗時の継続） |
 | `test_known_issues.py` | 監査 Issue の統合検証および未対応課題（#18, #26 等）の現行挙動固定 |
 
 ## `known_issue` マーカーについて

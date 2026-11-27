@@ -1,8 +1,24 @@
 import logging
 import os
+import sys
 from logging.handlers import TimedRotatingFileHandler
 
 _ROOT_LOGGER_NAME = "smbc_card_recorder"
+
+
+def _chmod_best_effort(path, mode):
+    """
+    権限を変更する。所有者が異なる等で変更できない場合も起動を止めず、標準エラーへ警告のみ出力する。
+
+    （ロガー初期化中のためロガーは使えない）
+    """
+    try:
+        os.chmod(path, mode)
+    except OSError as e:
+        print(
+            f"[WARNING] '{path}' の権限を {oct(mode)} に変更できませんでした: {e}",
+            file=sys.stderr,
+        )
 
 
 class _RestrictedTimedRotatingFileHandler(TimedRotatingFileHandler):
@@ -11,7 +27,7 @@ class _RestrictedTimedRotatingFileHandler(TimedRotatingFileHandler):
     def _open(self):
         flags = os.O_CREAT | os.O_APPEND | os.O_WRONLY
         fd = os.open(self.baseFilename, flags, 0o600)
-        os.chmod(self.baseFilename, 0o600)
+        _chmod_best_effort(self.baseFilename, 0o600)
         return os.fdopen(fd, self.mode, encoding=self.encoding, errors=self.errors)
 
 
@@ -40,7 +56,7 @@ def _init_root_logger():
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     log_dir = os.path.join(base_dir, "logs")
     os.makedirs(log_dir, mode=0o700, exist_ok=True)
-    os.chmod(log_dir, 0o700)
+    _chmod_best_effort(log_dir, 0o700)
 
     file_handler = _RestrictedTimedRotatingFileHandler(
         filename=os.path.join(log_dir, "app.log"),

@@ -9,7 +9,7 @@ from googleapiclient.errors import HttpError
 import src.mailDisco as mailDisco
 import src.mailSystem as mailSystem
 import src.purpose as purpose_module
-from tests.conftest import encode_b64url, run_main_block
+from tests.conftest import encode_b64url, expected_earliest_after, run_main_block
 
 
 def _make_http_error(status: int = 500, reason: str = "Server Error") -> HttpError:
@@ -40,7 +40,7 @@ class TestInitializeServices:
         mock_sa.assert_called_once_with(
             filename=mailSystem.SERVICE_ACCOUNT_FILE,
             scopes=mailSystem.SCOPES_SHEET,
-            http_client=gspread.BackOffHTTPClient,
+            http_client=mailSystem.BoundedBackOffHTTPClient,
         )
         mock_gc.open_by_key.assert_called_once_with(mailSystem.SPREADSHEET_ID)
         assert mailSystem.gmail_service is mock_gmail
@@ -167,7 +167,9 @@ class TestCheckMailJob:
             mailSystem.check_mail_job()
         assert "サービスが初期化されていません" in caplog.text
 
-    def test_first_run_query_without_after_and_no_messages_saves_state(self, tmp_path):
+    def test_first_run_query_limited_to_search_window_and_no_messages_saves_state(
+        self, tmp_path, pinned_job_now
+    ):
         gmail = MagicMock()
         gmail.users().messages().list().execute.return_value = {}
         mailSystem.gmail_service = gmail
@@ -178,13 +180,16 @@ class TestCheckMailJob:
         list_call = gmail.users().messages().list.call_args
         assert list_call.kwargs == {
             "userId": "me",
-            "q": 'subject:"ご利用のお知らせ【三井住友カード】" -in:trash -in:spam',
+            "q": (
+                'subject:"ご利用のお知らせ【三井住友カード】" -in:trash -in:spam -in:sent -in:drafts'
+                f" after:{expected_earliest_after(pinned_job_now)}"
+            ),
             "maxResults": 500,
         }
         assert (tmp_path / "last_run_time.json").exists()
         assert (tmp_path / "processed_message_ids.json").exists()
 
-    def test_subsequent_run_appends_after_timestamp_with_overlap_margin(self):
+    def test_subsequent_run_appends_after_timestamp_with_overlap_margin(self, pinned_job_now):
         last_time = datetime.datetime(2026, 11, 20, 12, 0, 0, tzinfo=datetime.timezone.utc)
         mailSystem.save_current_run_time(last_time)
 
@@ -198,7 +203,8 @@ class TestCheckMailJob:
         expected_ts = int(last_time.timestamp()) - mailSystem.LAST_RUN_OVERLAP_SECONDS
         list_call = gmail.users().messages().list.call_args
         assert list_call.kwargs["q"] == (
-            f'subject:"ご利用のお知らせ【三井住友カード】" -in:trash -in:spam after:{expected_ts}'
+            'subject:"ご利用のお知らせ【三井住友カード】" -in:trash -in:spam -in:sent -in:drafts'
+            f" after:{expected_ts}"
         )
 
     def test_processes_new_messages_in_chronological_order_and_skips_already_processed(self, tmp_path):

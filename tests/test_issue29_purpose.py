@@ -15,19 +15,38 @@ def _make_purpose_subclass(csv_path):
     return IsolatedPurpose
 
 
-def test_positional_csv_exact_and_blank_lines_do_not_shift(tmp_path):
+def test_positional_csv_blank_lines_keep_row_position(tmp_path):
+    """行順形式では空行（空白のみ・カンマのみ含む）も1カテゴリ分として数え、以降の行を繰り上げない。"""
     csv_file = tmp_path / "categories.csv"
     csv_file.write_text(
-        "スーパーA,コンビニC\n\nレストランA\n   \nドラッグストアA\nJR東日本\nAmazon\n",
+        "スーパーA,コンビニC\n\n   \n,\nAmazon\n",
         encoding="utf-8",
     )
     cls = _make_purpose_subclass(csv_file)
 
     assert cls("スーパーA").judge() == "食費"
-    assert cls("レストランA").judge() == "外食費"
-    assert cls("ドラッグストアA").judge() == "生活雑貨"
-    assert cls("JR東日本").judge() == "交通費"
+    # 2〜4行目（外食費・生活雑貨・交通費）は店舗未登録のまま、5行目は「その他」に対応する
     assert cls("Amazon").judge() == "その他"
+    assert set(cls._category_map.values()) == {"食費", "その他"}
+
+
+def test_positional_csv_trailing_blank_lines_beyond_five_rows_are_ignored_silently(tmp_path, caplog):
+    csv_file = tmp_path / "categories.csv"
+    csv_file.write_text("A\nB\nC\nD\nE\n\n  \n", encoding="utf-8")
+    cls = _make_purpose_subclass(csv_file)
+
+    with caplog.at_level("WARNING"):
+        assert cls("E").judge() == "その他"
+    assert "カテゴリ定義がないためスキップ" not in caplog.text
+
+
+def test_two_column_header_detected_after_leading_blank_lines(tmp_path):
+    csv_file = tmp_path / "categories.csv"
+    csv_file.write_text("\nstore,category\n\nスーパーA,食費\n", encoding="utf-8")
+    cls = _make_purpose_subclass(csv_file)
+
+    assert cls("スーパーA").judge() == "食費"
+    assert "store" not in cls._category_map
 
 
 def test_utf8_bom_csv_loads_first_entry_cleanly(tmp_path):

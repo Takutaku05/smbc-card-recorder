@@ -169,7 +169,9 @@ def test_check_mail_job_does_not_mark_processed_when_system_fails(monkeypatch):
 
     mailSystem.check_mail_job()
     assert "msg-1" not in mailSystem.processed_ids
-    discord_cls.return_value.send.assert_called_once()
+    # 書き込み失敗の詳細（利用先・金額・エラー）は sheet() 内で通知済みのため、check_mail_job では重複通知しない
+    discord_cls.return_value.send.assert_not_called()
+    assert mailSystem._message_failure_counts == {"msg-1": 1}
 
 
 def test_check_mail_job_does_not_mark_processed_when_body_empty(monkeypatch):

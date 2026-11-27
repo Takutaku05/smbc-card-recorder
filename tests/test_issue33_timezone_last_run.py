@@ -57,7 +57,7 @@ def test_legacy_naive_last_run_time_migrates_to_utc_aware(tmp_path, monkeypatch)
     assert loaded.tzinfo == datetime.timezone.utc
 
 
-def test_check_mail_job_applies_overlap_margin_and_saves_utc_time(monkeypatch):
+def test_check_mail_job_applies_overlap_margin_and_saves_utc_time(monkeypatch, pinned_job_now):
     captured_queries = []
     saved_times = []
 
@@ -68,7 +68,7 @@ def test_check_mail_job_applies_overlap_margin_and_saves_utc_time(monkeypatch):
     service = MagicMock()
     service.users.return_value.messages.return_value.list.side_effect = _list
 
-    last_run_utc = datetime.datetime(2026, 9, 6, 10, 0, 0, tzinfo=datetime.timezone.utc)
+    last_run_utc = datetime.datetime(2026, 11, 6, 10, 0, 0, tzinfo=datetime.timezone.utc)
     expected_after = int(last_run_utc.timestamp()) - mailSystem.LAST_RUN_OVERLAP_SECONDS
 
     monkeypatch.setattr(mailSystem, "gc", MagicMock())

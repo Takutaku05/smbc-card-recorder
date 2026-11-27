@@ -61,15 +61,15 @@ class TestPurpose:
         assert Purpose("スターバックス 渋谷店").judge() == "食費"
         assert Purpose("東京 スターバックス 渋谷").judge() == "食費"
 
-    def test_load_strips_whitespace_and_skips_empty_cells_and_blank_lines(self, monkeypatch, tmp_path):
+    def test_load_strips_whitespace_and_skips_empty_cells_and_keeps_blank_line_position(self, monkeypatch, tmp_path):
         csv_content = "  スーパーA , ,   , スーパーB  \n\n  レストランA  \n"
         _setup_csv(monkeypatch, tmp_path, csv_content)
 
         p = Purpose("スーパーA")
         assert p.judge() == "食費"
         assert Purpose("スーパーB").judge() == "食費"
-        # 空行はセパレータとしてスキップされ、次の非空行が2番目カテゴリ（外食費）になる
-        assert Purpose("レストランA").judge() == "外食費"
+        # 空行も1行として数えるため（main と同じ行番号＝カテゴリ）、3行目は3番目カテゴリ（生活雑貨）になる
+        assert Purpose("レストランA").judge() == "生活雑貨"
         assert "" not in Purpose._category_map
 
     def test_two_column_csv_skips_short_and_incomplete_rows(self, monkeypatch, tmp_path):

@@ -47,21 +47,19 @@ def test_initialize_services_uses_backoff_http_client(tmp_path, monkeypatch):
     creds = MagicMock(valid=True)
 
     service_account_mock = MagicMock()
-    backoff_cls = object()
 
     monkeypatch.setattr(mailSystem, "TOKEN_FILE", str(token_file))
     monkeypatch.setattr(mailSystem, "SERVICE_ACCOUNT_FILE", "dummy_sa.json")
     monkeypatch.setattr(mailSystem, "SPREADSHEET_ID", "dummy-sheet-id")
     monkeypatch.setattr(mailSystem, "GmailCredentials", types.SimpleNamespace(from_authorized_user_file=lambda *_a: creds))
     monkeypatch.setattr(mailSystem, "build", lambda *_a, **_kw: MagicMock())
-    monkeypatch.setattr(_gspread, "BackOffHTTPClient", backoff_cls, raising=False)
     monkeypatch.setattr(_gspread, "service_account", service_account_mock, raising=False)
 
     assert mailSystem.initialize_services() is True
     service_account_mock.assert_called_once_with(
         filename="dummy_sa.json",
         scopes=mailSystem.SCOPES_SHEET,
-        http_client=backoff_cls,
+        http_client=mailSystem.BoundedBackOffHTTPClient,
     )
 
 
