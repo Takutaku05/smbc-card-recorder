@@ -120,3 +120,34 @@ def test_sheet_invalidates_cache_when_gc_or_spreadsheet_id_changes(monkeypatch):
     monkeypatch.setattr(mailSystem, "gc", gc2)
     assert mailSystem.sheet("2026/01/07 12:00", "店C", 300) is True
     assert gc2.open_by_key.call_count == 1
+
+
+def test_cache_cleared_after_write_failure():
+    """書き込み失敗時はキャッシュを破棄し、次回は open_by_key から再取得する。"""
+    import types
+
+    import src.mailSystem as ms
+
+    calls = {"open": 0}
+    ws = types.SimpleNamespace(
+        get_all_values=lambda: (_ for _ in ()).throw(RuntimeError("stale")),
+        append_row=lambda row: (_ for _ in ()).throw(RuntimeError("stale")),
+    )
+    ss = types.SimpleNamespace(worksheet=lambda name: ws)
+
+    def open_by_key(key):
+        calls["open"] += 1
+        return ss
+
+    ms.gc = types.SimpleNamespace(open_by_key=open_by_key)
+    ms._cached_gc = None
+    ms._cached_spreadsheet = None
+    ms._worksheet_cache = {}
+
+    import unittest.mock as um
+    with um.patch.object(ms.mailDisco, "MailDisco"), um.patch.object(ms.purpose, "Purpose"):
+        assert ms.sheet("2026/11/27 10:00", "店", 100) is False
+        assert ms._cached_spreadsheet is None
+        assert ms._worksheet_cache == {}
+        ms.sheet("2026/11/27 10:00", "店", 100)
+    assert calls["open"] == 2

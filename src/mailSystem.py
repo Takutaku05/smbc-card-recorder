@@ -419,12 +419,18 @@ def sheet(email_time, location, money):
             return True
 
     except gspread.exceptions.SpreadsheetNotFound:
+        # キャッシュが古い可能性があるため破棄し、次回は再取得する
+        _cached_spreadsheet = None
+        _worksheet_cache = {}
         logger.error("スプレッドシートが見つかりません。IDが正しいか確認してください: %s", SPREADSHEET_ID)
         mailDisco.MailDisco(
             f"❌ スプレッドシートが見つからず、利用先: {location} / 金額: {money} を記録できませんでした。SPREADSHEET_IDを確認してください。"
         ).send()
         return False
     except Exception as e:
+        # シート削除・リネーム等でキャッシュが無効になっている可能性があるため破棄し、次回は再取得する
+        _cached_spreadsheet = None
+        _worksheet_cache = {}
         logger.error("スプレッドシートへの書き込み中に予期せぬエラーが発生しました: %s", e, exc_info=True)
         mailDisco.MailDisco(
             f"❌ スプレッドシートへの書き込みに失敗しました。\n利用先: {location} / 金額: {money}\nエラー: {e}"
