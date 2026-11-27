@@ -111,4 +111,4 @@ def test_check_mail_job_persists_processed_id_immediately_per_message(tmp_path, 
     with pytest.raises(KeyboardInterrupt):
         mailSystem.check_mail_job()
 
-    assert json.loads(proc_ids_file.read_text(encoding="utf-8")) == ["m1"]
+    assert set(json.loads(proc_ids_file.read_text(encoding="utf-8"))) == {"m1"}

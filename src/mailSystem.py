@@ -32,6 +32,9 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOKEN_FILE = os.path.join(BASE_DIR, "config", "gmailtoken.json")
 LAST_RUN_FILE = os.path.join(BASE_DIR, "config", "last_run_time.json")
 PROCESSED_IDS_FILE = os.path.join(BASE_DIR, "config", "processed_message_ids.json")
+PROCESSED_IDS_MAX_ENTRIES = 2000
+PROCESSED_IDS_RETENTION_DAYS = 90
+_processed_id_timestamps = {}
 def _resolve_config_path(file_path):
     """
     設定ファイルパスが相対パスの場合、プロジェクトルート (BASE_DIR) 基準に解決する。
@@ -276,30 +279,84 @@ def load_processed_ids():
     処理済みのメールIDリストをファイルから読み込み、グローバル変数 ``processed_ids`` を更新する。
     重複処理を防ぐために使用される。
     """
-    global processed_ids
+    global processed_ids, _processed_id_timestamps
     if os.path.exists(PROCESSED_IDS_FILE):
         try:
             with open(PROCESSED_IDS_FILE, "r", encoding="utf-8") as f:
-                ids_list = json.load(f)
-                processed_ids = set(ids_list)
-                logger.info("処理済みメールIDを %d 件ロードしました。", len(processed_ids))
+                raw_data = json.load(f)
+
+            now = datetime.datetime.now(datetime.timezone.utc)
+            now_iso = now.isoformat()
+            if isinstance(raw_data, list):
+                ts_map = {str(mid): now_iso for mid in raw_data}
+            elif isinstance(raw_data, dict):
+                ts_map = {str(k): str(v) for k, v in raw_data.items()}
+            else:
+                raise TypeError("processed_message_ids.json の形式が不正です。")
+
+            pruned = _prune_processed_timestamps(ts_map, now=now)
+            _processed_id_timestamps = pruned
+            processed_ids = set(pruned.keys())
+            logger.info("処理済みメールIDを %d 件ロードしました。", len(processed_ids))
         except (json.JSONDecodeError, TypeError, OSError) as e:
             logger.warning("処理済みメールIDファイル '%s' が不正です。新しく作成します。エラー: %s", PROCESSED_IDS_FILE, e)
             mailDisco.MailDisco(
                 "⚠️ 処理済みメールIDファイルが破損または読み込み不能のため初期化しました。重複記録に注意してください。"
             ).send()
             processed_ids = set()
+            _processed_id_timestamps = {}
     else:
         logger.info("処理済みメールIDファイル '%s' が見つかりません。新しく作成します。", PROCESSED_IDS_FILE)
         processed_ids = set()
+        _processed_id_timestamps = {}
+
+
+def _prune_processed_timestamps(ts_map, now=None):
+    """
+    保持日数と最大件数の上限を超えた古い処理済みIDエントリを除去する。
+
+    :param ts_map: {message_id: iso_timestamp} 辞書
+    :type ts_map: dict[str, str]
+    :param now: 基準時刻（省略時は現在UTC時刻）
+    :type now: datetime.datetime | None
+    :return: パージ後の辞書
+    :rtype: dict[str, str]
+    """
+    if now is None:
+        now = datetime.datetime.now(datetime.timezone.utc)
+    cutoff = now - datetime.timedelta(days=PROCESSED_IDS_RETENTION_DAYS)
+
+    kept = []
+    for mid, ts_str in ts_map.items():
+        try:
+            parsed_dt = datetime.datetime.fromisoformat(ts_str).astimezone(datetime.timezone.utc)
+        except (ValueError, TypeError):
+            parsed_dt = now
+            ts_str = now.isoformat()
+        if parsed_dt >= cutoff:
+            kept.append((parsed_dt, mid, ts_str))
+
+    kept.sort(key=lambda item: item[0], reverse=True)
+    kept = kept[:PROCESSED_IDS_MAX_ENTRIES]
+    return {mid: ts_str for _dt, mid, ts_str in kept}
+
 
 def save_processed_ids():
     """
     現在の処理済みメールIDセット（``processed_ids``）をJSONファイルに保存する。
     """
-    global processed_ids
+    global processed_ids, _processed_id_timestamps
     try:
-        _atomic_write_json(PROCESSED_IDS_FILE, list(processed_ids))
+        now = datetime.datetime.now(datetime.timezone.utc)
+        now_iso = now.isoformat()
+        merged = {
+            mid: _processed_id_timestamps.get(mid, now_iso)
+            for mid in processed_ids
+        }
+        pruned = _prune_processed_timestamps(merged, now=now)
+        _processed_id_timestamps = pruned
+        processed_ids.intersection_update(pruned.keys())
+        _atomic_write_json(PROCESSED_IDS_FILE, _processed_id_timestamps)
     except OSError as e:
         logger.error("処理済みメールIDの保存中にエラーが発生しました: %s", e)
 
