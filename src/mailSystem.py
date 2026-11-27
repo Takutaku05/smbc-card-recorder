@@ -239,9 +239,12 @@ def _atomic_write_json(path, obj):
         raise
 
 
+LAST_RUN_OVERLAP_SECONDS = 300
+
+
 def get_last_run_time():
     """
-    前回の実行日時をJSONファイルから読み込む。
+    前回の実行日時をJSONファイルから読み込む（UTC aware datetime に正規化）。
 
     :return: 前回実行日時。ファイルが存在しないか破損している場合は None
     :rtype: datetime.datetime | None
@@ -250,7 +253,8 @@ def get_last_run_time():
         try:
             with open(LAST_RUN_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                return datetime.datetime.fromisoformat(data.get("last_run_time"))
+                dt = datetime.datetime.fromisoformat(data.get("last_run_time"))
+                return dt.astimezone(datetime.timezone.utc)
         except (json.JSONDecodeError, TypeError, ValueError, OSError) as e:
             logger.warning("前回の実行日時ファイルが不正です (%s)。新しく作成します。", e)
             mailDisco.MailDisco(
@@ -261,13 +265,14 @@ def get_last_run_time():
 
 def save_current_run_time(current_time):
     """
-    現在の実行日時をJSONファイルに保存する。
+    現在の実行日時を UTC aware ISO形式でJSONファイルに保存する。
 
     :param current_time: 保存する日時オブジェクト
     :type current_time: datetime.datetime
     """
     try:
-        _atomic_write_json(LAST_RUN_FILE, {"last_run_time": current_time.isoformat()})
+        aware_utc = current_time.astimezone(datetime.timezone.utc)
+        _atomic_write_json(LAST_RUN_FILE, {"last_run_time": aware_utc.isoformat()})
     except OSError as e:
         logger.error("前回実行日時の保存中にエラーが発生しました: %s", e)
 
@@ -678,15 +683,15 @@ def check_mail_job():
 
     logger.info("--- %s: 定時メールチェック実行 ---", datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
     
-    current_check_time = datetime.datetime.now()
+    current_check_time = datetime.datetime.now(datetime.timezone.utc)
     last_check_time = get_last_run_time()
 
     # Gmail検索クエリに対象の件名を追加（アーカイブ済みも含め、ゴミ箱・迷惑メールは除外）
     query = 'subject:"ご利用のお知らせ【三井住友カード】" -in:trash -in:spam'
     if last_check_time:
-        timestamp = int(last_check_time.timestamp())
-        query += f" after:{timestamp}"
-        logger.info("最終チェック日時 (%s) 以降を検索。", last_check_time.strftime('%Y-%m-%d %H:%M:%S'))
+        query_timestamp = max(0, int(last_check_time.timestamp()) - LAST_RUN_OVERLAP_SECONDS)
+        query += f" after:{query_timestamp}"
+        logger.info("最終チェック日時 (%s) 以降を検索 (after:%d)。", last_check_time.isoformat(), query_timestamp)
     else:
         logger.info("初回チェックまたは日時不明。対象件名の全メールを検索候補とします。")
 
