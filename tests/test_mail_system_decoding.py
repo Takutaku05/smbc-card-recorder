@@ -23,21 +23,24 @@ class TestDecodeBase64UrlSafe:
         assert mailSystem.decode_base64_url_safe(encoded) == text
 
     def test_decode_url_safe_characters_dash_and_underscore(self):
-        # URL-safe Base64 の '-' と '_' を含むバイト列
         raw = ">>??日本語テスト??<<".encode("utf-8")
         encoded = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
         assert mailSystem.decode_base64_url_safe(encoded) == ">>??日本語テスト??<<"
 
-    # ISO-2022-JP 本文は 7bit のため UTF-8 デコードがそのまま成功してしまう現行挙動は
-    # test_known_issues.py::test_issue19_iso_2022_jp_body_decodes_via_utf8_path で、
-    # UTF-8 失敗時に iso-2022-jp で再試行する経路は test_mail_system_parsing_extra.py で検証している。
-
-    def test_decode_bytes_invalid_in_both_encodings_raises_unicode_decode_error(self):
-        """UTF-8 でも iso-2022-jp でもデコードできないバイト列は UnicodeDecodeError を送出する。"""
-        invalid_bytes = b"\xff\xfe\xfd"
+    def test_decode_bytes_invalid_in_all_candidate_encodings_raises_unicode_decode_error(self):
+        """UTF-8 / iso-2022-jp / euc_jp / cp932 のいずれでも不正なバイト列は UnicodeDecodeError を送出する。"""
+        invalid_bytes = b"\x81\x00\xff\xfe"
         encoded = base64.urlsafe_b64encode(invalid_bytes).decode("ascii")
         with pytest.raises(UnicodeDecodeError):
-            mailSystem.decode_base64_url_safe(encoded)
+            mailSystem.decode_base64_url_safe(encoded, charset="utf-8")
+
+    def test_decode_unknown_charset_falls_back_to_utf8(self):
+        encoded = encode_b64url("テスト本文", encoding="utf-8", strip_padding=True)
+        assert mailSystem.decode_base64_url_safe(encoded, charset="x-unknown-charset") == "テスト本文"
+
+    def test_extract_charset_handles_content_type_without_charset_parameter(self):
+        part = {"headers": [{"name": "Content-Type", "value": "text/plain; format=flowed"}]}
+        assert mailSystem._extract_charset(part) is None
 
     def test_decode_empty_string(self):
         assert mailSystem.decode_base64_url_safe("") == ""
@@ -74,7 +77,7 @@ class TestGetEmailBody:
         }
         assert mailSystem.get_email_body(payload) == "後ろのプレーンテキスト"
 
-    def test_falls_back_to_text_html_when_no_plain_part(self):
+    def test_falls_back_to_text_html_converted_to_text_when_no_plain_part(self):
         payload = {
             "parts": [
                 {
@@ -83,7 +86,7 @@ class TestGetEmailBody:
                 },
             ]
         }
-        assert mailSystem.get_email_body(payload) == "<div>HTML本文のみ</div>"
+        assert mailSystem.get_email_body(payload) == "HTML本文のみ\n"
 
     def test_skips_plain_part_without_data_and_uses_html(self):
         payload = {
@@ -95,7 +98,7 @@ class TestGetEmailBody:
                 },
             ]
         }
-        assert mailSystem.get_email_body(payload) == "<p>フォールバックHTML</p>"
+        assert mailSystem.get_email_body(payload) == "フォールバックHTML\n"
 
     def test_extracts_single_part_body_directly(self):
         payload = {

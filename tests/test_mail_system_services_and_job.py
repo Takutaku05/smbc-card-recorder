@@ -3,12 +3,14 @@ import json
 import logging
 from unittest.mock import MagicMock, patch
 
-import pytest
+import gspread
+from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
 
+import src.mailDisco as mailDisco
 import src.mailSystem as mailSystem
 import src.purpose as purpose_module
-from tests.conftest import encode_b64url, run_main_block
+from tests.conftest import encode_b64url, expected_earliest_after, run_main_block
 
 
 def _make_http_error(status: int = 500, reason: str = "Server Error") -> HttpError:
@@ -24,6 +26,7 @@ class TestInitializeServices:
         token_path.write_text("{}", encoding="utf-8")
 
         mock_creds = MagicMock(valid=True, expired=False)
+        mock_creds.to_json.return_value = "{}"
         mock_gmail = MagicMock()
         mock_gc = MagicMock()
 
@@ -38,7 +41,9 @@ class TestInitializeServices:
         mock_sa.assert_called_once_with(
             filename=mailSystem.SERVICE_ACCOUNT_FILE,
             scopes=mailSystem.SCOPES_SHEET,
+            http_client=mailSystem.BoundedBackOffHTTPClient,
         )
+        mock_gc.open_by_key.assert_called_once_with(mailSystem.SPREADSHEET_ID)
         assert mailSystem.gmail_service is mock_gmail
         assert mailSystem.gc is mock_gc
 
@@ -63,9 +68,10 @@ class TestInitializeServices:
         token_path.write_text("{}", encoding="utf-8")
 
         mock_creds = MagicMock(valid=False, expired=True, refresh_token="refresh-tok")
-        mock_creds.refresh.side_effect = RuntimeError("invalid_grant")
+        mock_creds.refresh.side_effect = RefreshError("invalid_grant")
 
         with patch("src.mailSystem.GmailCredentials.from_authorized_user_file", return_value=mock_creds), \
+             patch("src.mailSystem.mailDisco.MailDisco"), \
              caplog.at_level(logging.ERROR, logger="smbc_card_recorder.src.mailSystem"):
             result = mailSystem.initialize_services()
 
@@ -162,7 +168,9 @@ class TestCheckMailJob:
             mailSystem.check_mail_job()
         assert "サービスが初期化されていません" in caplog.text
 
-    def test_first_run_query_without_after_and_no_messages_saves_state(self, tmp_path):
+    def test_first_run_query_limited_to_search_window_and_no_messages_saves_state(
+        self, tmp_path, pinned_job_now
+    ):
         gmail = MagicMock()
         gmail.users().messages().list().execute.return_value = {}
         mailSystem.gmail_service = gmail
@@ -173,13 +181,17 @@ class TestCheckMailJob:
         list_call = gmail.users().messages().list.call_args
         assert list_call.kwargs == {
             "userId": "me",
-            "q": 'in:inbox subject:"ご利用のお知らせ【三井住友カード】"',
+            "q": (
+                'subject:"ご利用のお知らせ【三井住友カード】" -in:trash -in:spam -in:sent -in:drafts'
+                f" after:{expected_earliest_after(pinned_job_now)}"
+            ),
+            "maxResults": 500,
         }
         assert (tmp_path / "last_run_time.json").exists()
         assert (tmp_path / "processed_message_ids.json").exists()
 
-    def test_subsequent_run_appends_after_timestamp_to_query(self):
-        last_time = datetime.datetime(2026, 11, 20, 12, 0, 0)
+    def test_subsequent_run_appends_after_timestamp_with_overlap_margin(self, pinned_job_now):
+        last_time = datetime.datetime(2026, 11, 20, 12, 0, 0, tzinfo=datetime.timezone.utc)
         mailSystem.save_current_run_time(last_time)
 
         gmail = MagicMock()
@@ -189,16 +201,18 @@ class TestCheckMailJob:
 
         mailSystem.check_mail_job()
 
-        expected_ts = int(last_time.timestamp())
+        expected_ts = int(last_time.timestamp()) - mailSystem.LAST_RUN_OVERLAP_SECONDS
         list_call = gmail.users().messages().list.call_args
         assert list_call.kwargs["q"] == (
-            f'in:inbox subject:"ご利用のお知らせ【三井住友カード】" after:{expected_ts}'
+            'subject:"ご利用のお知らせ【三井住友カード】" -in:trash -in:spam -in:sent -in:drafts'
+            f" after:{expected_ts}"
         )
 
-    def test_processes_new_messages_and_skips_already_processed(self, tmp_path):
+    def test_processes_new_messages_in_chronological_order_and_skips_already_processed(self, tmp_path):
         mailSystem.processed_ids = {"already_done"}
 
         gmail = MagicMock()
+        # Gmail API は降順（新着順）で返すため、check_mail_job は逆順（古い順: new_2 -> new_1）で処理する
         gmail.users().messages().list().execute.return_value = {
             "messages": [{"id": "already_done"}, {"id": "new_1"}, {"id": "new_2"}]
         }
@@ -219,7 +233,7 @@ class TestCheckMailJob:
             elif id == "new_2":
                 req.execute.return_value = {
                     "payload": {
-                        "headers": [],  # 件名ヘッダーなし -> "件名なし"
+                        "headers": [],
                         "body": {"data": encode_b64url("本文2")},
                     }
                 }
@@ -229,19 +243,18 @@ class TestCheckMailJob:
         mailSystem.gmail_service = gmail
         mailSystem.gc = MagicMock()
 
-        with patch.object(mailSystem, "system") as mock_system:
+        with patch.object(mailSystem, "system", return_value=True) as mock_system:
             mailSystem.check_mail_job()
 
-        # already_done に対しては get() が呼ばれない
         called_ids = [c.kwargs["id"] for c in gmail.users().messages().get.call_args_list]
-        assert called_ids == ["new_1", "new_2"]
-        assert [c.args[0] for c in mock_system.call_args_list] == ["本文1", "本文2"]
+        assert called_ids == ["new_2", "new_1"]
+        assert [c.args[0] for c in mock_system.call_args_list] == ["本文2", "本文1"]
         assert mailSystem.processed_ids == {"already_done", "new_1", "new_2"}
 
         saved_ids = set(json.loads((tmp_path / "processed_message_ids.json").read_text(encoding="utf-8")))
         assert saved_ids == {"already_done", "new_1", "new_2"}
 
-    def test_empty_body_skips_system_but_marks_processed(self):
+    def test_empty_body_skips_system_and_keeps_unprocessed_for_retry(self):
         gmail = MagicMock()
         gmail.users().messages().list().execute.return_value = {"messages": [{"id": "empty_msg"}]}
         gmail.users().messages().get().execute.return_value = {
@@ -250,11 +263,12 @@ class TestCheckMailJob:
         mailSystem.gmail_service = gmail
         mailSystem.gc = MagicMock()
 
-        with patch.object(mailSystem, "system") as mock_system:
+        with patch("src.mailSystem.mailDisco.MailDisco"), \
+             patch.object(mailSystem, "system") as mock_system:
             mailSystem.check_mail_job()
 
         mock_system.assert_not_called()
-        assert "empty_msg" in mailSystem.processed_ids
+        assert "empty_msg" not in mailSystem.processed_ids
 
     def test_per_message_http_error_and_generic_error_do_not_block_other_messages(self):
         gmail = MagicMock()
@@ -289,8 +303,10 @@ class TestCheckMailJob:
         def _system_side_effect(body):
             if body == "壊れる本文":
                 raise RuntimeError("parse crash")
+            return True
 
-        with patch.object(mailSystem, "system", side_effect=_system_side_effect):
+        with patch("src.mailSystem.mailDisco.MailDisco"), \
+             patch.object(mailSystem, "system", side_effect=_system_side_effect):
             mailSystem.check_mail_job()
 
         assert "err_http" not in mailSystem.processed_ids
@@ -326,12 +342,6 @@ class TestCheckMailJob:
 
 class TestEndToEndFlow:
     def test_full_pipeline_from_gmail_to_sheet_discord_and_dedup_on_second_run(self, monkeypatch, tmp_path):
-        """
-        Gmail受信 -> Base64デコード -> 正規表現抽出 -> Purposeカテゴリ判定
-        -> Google Sheets書き込み -> Discord通知 -> 状態ファイル保存 -> 2回目実行での重複スキップ
-        を一気通貫で検証する。
-        """
-        # Purpose 用の categories.csv を tmp_path に配置
         fake_src = tmp_path / "src"
         fake_src.mkdir()
         config_dir = tmp_path / "config"
@@ -343,7 +353,6 @@ class TestEndToEndFlow:
         monkeypatch.setattr(purpose_module, "__file__", str(fake_src / "purpose.py"))
         monkeypatch.setenv("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/e2e/token")
 
-        # Gmail モック
         email_text = (
             "ご利用日時：2026/11/27 18:45\n"
             "ご利用場所：スーパーA\n"
@@ -360,7 +369,6 @@ class TestEndToEndFlow:
             }
         }
 
-        # GSpread モック
         ws = MagicMock()
         ws.get_all_values.return_value = [
             ["日時", "場所", "金額", "用途"],
@@ -375,8 +383,7 @@ class TestEndToEndFlow:
         mailSystem.gmail_service = gmail
         mailSystem.gc = gc
 
-        with patch("src.mailDisco.requests.post", return_value=MagicMock(ok=True, status_code=204)) as mock_post:
-            # 1回目: 正常処理される
+        with patch.object(mailDisco._default_session, "post", return_value=MagicMock(ok=True, status_code=204)) as mock_post:
             mailSystem.check_mail_job()
 
             spreadsheet.worksheet.assert_called_once_with("11月")
@@ -386,7 +393,10 @@ class TestEndToEndFlow:
             )
             mock_post.assert_called_once_with(
                 "https://discord.com/api/webhooks/e2e/token",
-                json={"content": "【正常に書き込みました】\n利用先: スーパーA"},
+                json={
+                    "content": "【正常に書き込みました】\nシート: 11月 (3行目)\n利用先: スーパーA\n金額: 2580",
+                    "allowed_mentions": {"parse": []},
+                },
                 timeout=5,
             )
 
@@ -404,7 +414,6 @@ class TestMainEntrypoint:
         try:
             result = run_main_block()
 
-            # :00 と :30 の2つのジョブが登録されていること
             assert len(schedule_mod.jobs) == 2
             at_times = sorted(str(j.at_time) for j in schedule_mod.jobs)
             assert at_times == ["00:00:00", "00:30:00"]

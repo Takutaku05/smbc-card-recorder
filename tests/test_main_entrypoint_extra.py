@@ -1,16 +1,15 @@
 """
 `python -m src.mailSystem` / `python src/mailSystem.py` 実行時（__main__ ブロック）の追加回帰テスト。
-
-実際の Google / Discord / ファイル書き込みには一切触れず、起動シーケンスの順序・
-スケジュール登録・初回実行・メインループ・停止通知を検証する。
 """
 
 import json
-from unittest.mock import MagicMock
+import signal
+from unittest.mock import MagicMock, patch
 
 import pytest
 import schedule as schedule_mod
 
+import src.mailSystem as mailSystem
 from tests.conftest import run_main_block as _run_main
 
 
@@ -51,7 +50,6 @@ class TestMainEntrypointExtra:
 
     def test_initial_check_runs_once_immediately(self):
         result = _run_main()
-        # 初回実行で Gmail 検索が1回行われ、state が書き込まれる
         result["gmail"].users().messages().list().execute.assert_called_once_with(
             num_retries=3
         )
@@ -73,7 +71,6 @@ class TestMainEntrypointExtra:
 
     def test_main_loop_calls_run_pending_every_second_until_interrupt(self):
         result = _run_main(sleep_effects=(None, None, None, KeyboardInterrupt))
-        # 1回目の sleep は初回実行後、その後ループで run_pending -> sleep を繰り返す
         assert result["run_pending"].call_count == 3
         assert all(c.args == (1,) for c in result["sleep"].call_args_list)
 
@@ -82,6 +79,46 @@ class TestMainEntrypointExtra:
         assert result["disco_messages"] == [
             "❌ サービスの初期化に失敗しました。プログラムを終了します。"
         ]
+        # 設定・認証の誤りは再起動しても直らないため、RestartPreventExitStatus 用の終了コード 2 で終了する
+        assert result["exit_code"] == mailSystem.EXIT_CONFIG_FAILURE == 2
         result["run_pending"].assert_not_called()
         result["sleep"].assert_not_called()
         assert schedule_mod.jobs == []
+
+    def test_sigterm_handler_only_sets_flag_without_io(self, tmp_path):
+        """シグナルハンドラ内では状態保存・通知・例外送出を行わず、停止要求フラグを立てるだけ。"""
+        mailSystem.processed_ids = {"sigterm_msg"}
+        with (
+            patch("src.mailSystem.mailDisco.MailDisco") as mock_disco,
+            patch.object(mailSystem, "save_processed_ids") as mock_save,
+        ):
+            mailSystem._handle_sigterm(signal.SIGTERM, None)
+        assert mailSystem._shutdown_requested is True
+        mock_disco.assert_not_called()
+        mock_save.assert_not_called()
+        assert not (tmp_path / "processed_message_ids.json").exists()
+
+    def test_sigterm_in_main_loop_stops_gracefully_saves_state_and_notifies(self):
+        calls = {"n": 0}
+
+        def _on_sleep(_seconds):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                # runpy で実行中の __main__ 名前空間に登録されたハンドラを呼ぶ（= SIGTERM 受信）
+                signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+
+        result = _run_main(on_sleep=_on_sleep)
+        assert result["exit_code"] is None  # 正常停止（終了コード 0）
+
+        # 1回目: 初回実行後の sleep、2回目: ループ内の sleep（ここで SIGTERM）→ ループを抜ける
+        assert result["sleep"].call_count == 2
+        assert result["run_pending"].call_count == 1
+        assert result["disco_messages"][-1] == "--- メール監視システムを停止しました ---"
+        # 停止時は systemd の停止タイムアウトを超えないよう 429 を再試行しない
+        assert result["disco_cls"].call_args_list[-1].kwargs == {"max_retries": 0}
+        writes = [e[1] for e in result["events"] if e[0] == "write"]
+        assert writes[-2:] == ["processed_message_ids.json", "failed_message_attempts.json"]
+
+    def test_failure_counts_are_loaded_at_startup(self):
+        result = _run_main(json_files={"failed_message_attempts.json": json.dumps({"m": 2})})
+        assert ("read", "failed_message_attempts.json") in result["events"]

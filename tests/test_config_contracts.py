@@ -38,10 +38,10 @@ class TestModuleConstants:
             mailSystem.SCOPES_GMAIL == "https://www.googleapis.com/auth/gmail.readonly"
         )
 
-    def test_sheet_scopes(self):
+    def test_sheet_scopes_minimal_privilege(self):
+        # Issue #25: open_by_key 利用時は spreadsheets スコープのみで動作し drive 権限を要求しない
         assert mailSystem.SCOPES_SHEET == [
             "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive",
         ]
 
     def test_base_dir_is_repository_root(self):
@@ -55,7 +55,6 @@ class TestModuleConstants:
             ("LAST_RUN_FILE", "last_run_time.json"),
             ("PROCESSED_IDS_FILE", "processed_message_ids.json"),
         ]:
-            # フォーマッタによる改行・空白・クォート種別の変更には影響されないようにする
             pattern = (
                 rf"{const}\s*=\s*os\.path\.join\(\s*BASE_DIR\s*,\s*"
                 rf"[\"']config[\"']\s*,\s*[\"']{re.escape(filename)}[\"']\s*,?\s*\)"
@@ -64,7 +63,11 @@ class TestModuleConstants:
 
     def test_env_driven_settings_read_expected_variable_names(self):
         source = (REPO_ROOT / "src/mailSystem.py").read_text(encoding="utf-8")
-        assert _getenv_names(source) == {"SERVICE_ACCOUNT_FILE", "SPREADSHEET_ID"}
+        assert _getenv_names(source) == {
+            "SERVICE_ACCOUNT_FILE",
+            "SPREADSHEET_ID",
+            "DISCORD_WEBHOOK_URL",
+        }
         disco_source = (REPO_ROOT / "src/mailDisco.py").read_text(encoding="utf-8")
         assert _getenv_names(disco_source) == {"DISCORD_WEBHOOK_URL"}
 
@@ -116,11 +119,13 @@ class TestEnvExample:
 
     def test_env_example_service_account_points_into_config_dir(self):
         env = self._parse_env(REPO_ROOT / ".env.example")
-        assert env["SERVICE_ACCOUNT_FILE"].startswith("config/")
+        assert env["SERVICE_ACCOUNT_FILE"] == "config/service_account.json"
 
 
 class TestConfigExamples:
-    @pytest.mark.parametrize("name", ["credentials.json.example", "sheet.json.example"])
+    @pytest.mark.parametrize(
+        "name", ["credentials.json.example", "service_account.json.example"]
+    )
     def test_json_examples_are_valid_json(self, name):
         json.loads((REPO_ROOT / "config" / name).read_text(encoding="utf-8"))
 
@@ -141,9 +146,11 @@ class TestConfigExamples:
         ):
             assert key in data["installed"]
 
-    def test_sheet_example_is_service_account(self):
+    def test_service_account_example_is_service_account(self):
         data = json.loads(
-            (REPO_ROOT / "config" / "sheet.json.example").read_text(encoding="utf-8")
+            (REPO_ROOT / "config" / "service_account.json.example").read_text(
+                encoding="utf-8"
+            )
         )
         assert data["type"] == "service_account"
         for key in ("client_email", "private_key", "token_uri"):
@@ -185,6 +192,7 @@ class TestGitignoreProtectsSecrets:
             ".env",
             "config/gmailtoken.json",
             "config/credentials.json",
+            "config/service_account.json",
             "config/sheet.json",
             "config/categories.csv",
             "config/last_run_time.json",

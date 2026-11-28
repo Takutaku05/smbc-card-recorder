@@ -17,10 +17,12 @@ class TestTimesheet:
             ("2026/09/30 18:15", "9月"),
             ("2026/10/10 10:10:10", "10月"),
             ("2026/11/05 12:00", "11月"),
+            ("2026-11-05 12:00", "11月"),
+            ("2026/1/5 9:00", "1月"),
             ("2026/12/31 23:59:59", "12月"),
         ],
     )
-    def test_timesheet_parses_both_hhmm_and_hhmmss_formats(self, time_str, expected):
+    def test_timesheet_parses_supported_formats(self, time_str, expected):
         assert mailSystem.timesheet(time_str) == expected
 
     @pytest.mark.parametrize(
@@ -28,7 +30,6 @@ class TestTimesheet:
         [
             "N/A",
             "",
-            "2026-11-05 12:00",
             "2026/11/05",
             "2026/02/30 12:00",
             "2026/13/01 12:00",
@@ -54,7 +55,7 @@ class TestSystemParsing:
             "ご利用金額：3,480円\n"
             "今後ともよろしくお願いいたします。"
         )
-        with patch.object(mailSystem, "sheet") as mock_sheet:
+        with patch.object(mailSystem, "sheet", return_value=True) as mock_sheet:
             mailSystem.system(body)
 
         mock_sheet.assert_called_once_with("2026/11/27 14:35", "スーパーA", 3480)
@@ -65,7 +66,7 @@ class TestSystemParsing:
             "利用先:   JR東日本 渋谷駅  \n"
             "利用金額: 210円\n"
         )
-        with patch.object(mailSystem, "sheet") as mock_sheet:
+        with patch.object(mailSystem, "sheet", return_value=True) as mock_sheet:
             mailSystem.system(body)
 
         mock_sheet.assert_called_once_with("2026/07/03 08:15:42", "JR東日本 渋谷駅", 210)
@@ -76,7 +77,7 @@ class TestSystemParsing:
             "ご利用場所:家電量販店\n"
             "ご利用金額 1,234,567円\n"
         )
-        with patch.object(mailSystem, "sheet") as mock_sheet:
+        with patch.object(mailSystem, "sheet", return_value=True) as mock_sheet:
             mailSystem.system(body)
 
         mock_sheet.assert_called_once_with("2026/12/01 20:00", "家電量販店", 1234567)
@@ -85,50 +86,50 @@ class TestSystemParsing:
         body_zero = "利用日: 2026/05/01 10:00\n利用先: テスト店\n利用金額: 0円"
         body_neg = "利用日: 2026/05/01 10:00\n利用先: 返金店舗\n利用金額: -1,500円"
 
-        with patch.object(mailSystem, "sheet") as mock_sheet:
+        with patch.object(mailSystem, "sheet", return_value=True) as mock_sheet:
             mailSystem.system(body_zero)
             mailSystem.system(body_neg)
 
         assert mock_sheet.call_args_list[0].args == ("2026/05/01 10:00", "テスト店", 0)
         assert mock_sheet.call_args_list[1].args == ("2026/05/01 10:00", "返金店舗", -1500)
 
-    def test_system_keeps_raw_string_when_amount_int_conversion_fails(self, caplog):
-        """正規表現 [-?\\d,]+ にマッチするが int() に失敗する値（例: --100）は文字列のまま渡される。"""
+    def test_system_passes_na_when_amount_grouping_is_invalid(self, caplog):
+        """桁区切りが不正な金額（例: 1,23円）は警告ログを出して N/A として渡される（Issue #21）。"""
         body = (
             "利用日: 2026/05/01 10:00\n"
             "利用先: テスト店\n"
-            "利用金額: --100円\n"
+            "利用金額: 1,23円\n"
         )
-        with patch.object(mailSystem, "sheet") as mock_sheet:
+        with patch.object(mailSystem, "sheet", return_value=mailSystem.SHEET_SKIPPED) as mock_sheet:
             with caplog.at_level(logging.WARNING, logger="smbc_card_recorder.src.mailSystem"):
                 mailSystem.system(body)
 
-        mock_sheet.assert_called_once_with("2026/05/01 10:00", "テスト店", "--100")
-        assert "数値に変換できませんでした" in caplog.text
+        mock_sheet.assert_called_once_with("2026/05/01 10:00", "テスト店", "N/A")
+        assert "書式が不正なため N/A として扱います" in caplog.text
 
     def test_system_missing_datetime_passes_na(self):
         body = "利用先: コンビニC\n利用金額: 500円"
-        with patch.object(mailSystem, "sheet") as mock_sheet:
+        with patch.object(mailSystem, "sheet", return_value=mailSystem.SHEET_SKIPPED) as mock_sheet:
             mailSystem.system(body)
 
         mock_sheet.assert_called_once_with("N/A", "コンビニC", 500)
 
     def test_system_missing_location_passes_na(self):
         body = "利用日: 2026/05/01 10:00\n利用金額: 500円"
-        with patch.object(mailSystem, "sheet") as mock_sheet:
+        with patch.object(mailSystem, "sheet", return_value=mailSystem.SHEET_SKIPPED) as mock_sheet:
             mailSystem.system(body)
 
         mock_sheet.assert_called_once_with("2026/05/01 10:00", "N/A", 500)
 
     def test_system_missing_amount_passes_na(self):
         body = "利用日: 2026/05/01 10:00\n利用先: コンビニC"
-        with patch.object(mailSystem, "sheet") as mock_sheet:
+        with patch.object(mailSystem, "sheet", return_value=mailSystem.SHEET_SKIPPED) as mock_sheet:
             mailSystem.system(body)
 
         mock_sheet.assert_called_once_with("2026/05/01 10:00", "コンビニC", "N/A")
 
     def test_system_completely_unmatched_body_passes_all_na(self):
-        with patch.object(mailSystem, "sheet") as mock_sheet:
+        with patch.object(mailSystem, "sheet", return_value=mailSystem.SHEET_SKIPPED) as mock_sheet:
             mailSystem.system("無関係なメール本文です。")
 
         mock_sheet.assert_called_once_with("N/A", "N/A", "N/A")

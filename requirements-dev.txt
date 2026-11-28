@@ -1,5 +1,6 @@
-# テスト用依存（本番依存は requirements.txt）
+# テスト・開発用依存（本番依存は requirements.txt）
 -r requirements.txt
 
 pytest==9.2.0
 pytest-cov==7.1.0
+ruff==0.17.6

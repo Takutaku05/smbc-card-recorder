@@ -1,8 +1,6 @@
 import logging
 from unittest.mock import patch
 
-import pytest
-
 import src.purpose as purpose_module
 from src.purpose import Purpose
 
@@ -50,27 +48,43 @@ class TestPurpose:
 
         assert Purpose("未知の店舗").judge() is None
         assert Purpose("").judge() is None
+        assert Purpose("   ").judge() is None
         assert Purpose("N/A").judge() is None
 
-    def test_judge_is_exact_match_only(self, monkeypatch, tmp_path):
-        """現行mainの仕様: 完全一致のみ判定され、部分一致や大文字小文字違いはNone。"""
+    def test_judge_supports_nfkc_casefold_prefix_and_substring_match(self, monkeypatch, tmp_path):
+        """Issue #29: NFKC正規化・大文字小文字無視のうえで完全一致・前方一致・部分一致を判定する。"""
         _setup_csv(monkeypatch, tmp_path, "Amazon,スターバックス\n")
 
         assert Purpose("Amazon").judge() == "食費"
-        assert Purpose("amazon").judge() is None
-        assert Purpose("Amazon.co.jp").judge() is None
-        assert Purpose("スターバックス 渋谷店").judge() is None
+        assert Purpose("amazon").judge() == "食費"
+        assert Purpose("Ａｍａｚｏｎ.co.jp").judge() == "食費"
+        assert Purpose("スターバックス 渋谷店").judge() == "食費"
+        assert Purpose("東京 スターバックス 渋谷").judge() == "食費"
 
-    def test_load_strips_whitespace_and_skips_empty_cells(self, monkeypatch, tmp_path):
-        csv_content = "  スーパーA , ,   , スーパーB  \n\n  ドラッグストアA  \n"
+    def test_load_strips_whitespace_and_skips_empty_cells_and_keeps_blank_line_position(self, monkeypatch, tmp_path):
+        csv_content = "  スーパーA , ,   , スーパーB  \n\n  レストランA  \n"
         _setup_csv(monkeypatch, tmp_path, csv_content)
 
         p = Purpose("スーパーA")
         assert p.judge() == "食費"
         assert Purpose("スーパーB").judge() == "食費"
-        # 2行目は空行なので外食費は空、3行目が生活雑貨
-        assert Purpose("ドラッグストアA").judge() == "生活雑貨"
+        # 空行も1行として数えるため（main と同じ行番号＝カテゴリ）、3行目は3番目カテゴリ（生活雑貨）になる
+        assert Purpose("レストランA").judge() == "生活雑貨"
         assert "" not in Purpose._category_map
+
+    def test_two_column_csv_skips_short_and_incomplete_rows(self, monkeypatch, tmp_path):
+        csv_content = (
+            "store,category\n"
+            "単一カラム行\n"
+            ",食費\n"
+            "空カテゴリ店,\n"
+            "有効店舗,交通費\n"
+        )
+        _setup_csv(monkeypatch, tmp_path, csv_content)
+
+        assert Purpose("有効店舗").judge() == "交通費"
+        assert Purpose("単一カラム行").judge() is None
+        assert Purpose("空カテゴリ店").judge() is None
 
     def test_load_skips_rows_beyond_category_order_with_warning(self, monkeypatch, tmp_path, caplog):
         csv_content = (
@@ -116,13 +130,13 @@ class TestPurpose:
             result = Purpose("スーパーA").judge()
 
         assert result is None
-        assert Purpose._category_map == {}
+        assert Purpose._category_map is None
         assert "categories.csv" in caplog.text
 
     def test_read_error_is_caught_and_logged(self, monkeypatch, tmp_path, caplog):
         csv_path = _setup_csv(monkeypatch, tmp_path, "dummy")
-        # UTF-8でデコードできない不正バイト列を書き込む
-        csv_path.write_bytes(b"\x82\xa0\x82\xa2\xff\xfe")
+        # UTF-8 でも CP932 でもデコードできない不正バイト列を書き込む
+        csv_path.write_bytes(b"\x81\x00\xff\xfe")
 
         with caplog.at_level(logging.ERROR, logger="smbc_card_recorder.src.purpose"):
             result = Purpose("スーパーA").judge()

@@ -208,14 +208,24 @@ __marimo__/
 
 
 # add
-.env
 config.py
 logs/
 
 # Ignore sensitive config files, but track examples
-config/*.json
-config/*.csv
+config/*
 !config/*.example
+
+# Secret keys and env files anywhere in the repo
+.env.*
+!.env.example
+*.p12
+*.pem
+*.pfx
+*.key
+service_account.json
+credentials.json
+gmailtoken.json
+client_secret*.json
 
 .DS_Store
 .claude/
